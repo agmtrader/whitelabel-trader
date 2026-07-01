@@ -1,66 +1,155 @@
+# Expo
+.expo
+__generated__
+web-build
+bare-apps
+
+# macOS
+.DS_Store
+
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+
+# pnpm
+.pnpm-debug.log*
+
+# Turborepo
+.turbo/
+
+# build outputs
+/packages/**/build/
+
+# Ruby
+.direnv
+
+# Env
+.envrc.local
+
+# Emacs
+*~
+
+# Vim
+.*.swp
+.*.swo
+.*.swn
+.*.swm
+
+# VS Code
+.vscode/launch.json
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
 # Xcode
-#
-# gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore
+*.pbxuser
+!default.pbxuser
+*.xccheckout
+*.xcscmblueprint
+xcuserdata
 
-# Personal
-.env
-*.DS_Store
+# IDEA / Android Studio
+*.iml
+.gradle
+.idea
 
-## User settings
-xcuserdata/
+# Kotlin compiler daemon session files
+.kotlin/
 
-## Obj-C/Swift specific
-*.hmap
+# Eclipse
+.project
+.settings
 
-## App packaging
-*.ipa
-*.dSYM.zip
-*.dSYM
+# VSCode
+.history/
+/vscode/launch.json
 
-## Playgrounds
-timeline.xctimeline
-playground.xcworkspace
+# Android
+*.apk
+*.hprof
+ReactAndroid-temp.aar
 
-# Swift Package Manager
-#
-# Add this line if you want to avoid checking in source code from Swift Package Manager dependencies.
-# Packages/
-# Package.pins
-# Package.resolved
-# *.xcodeproj
-#
-# Xcode automatically generates this directory with a .xcworkspacedata file and xcuserdata
-# hence it is not needed unless you have added a package configuration file to your project
-# .swiftpm
+# Tools
+jarjar-rules.txt
 
-.build/
+# Dynamic Macros
+.kernel-ngrok-url
 
-# CocoaPods
-#
-# We recommend against adding the Pods directory to your .gitignore. However
-# you should judge for yourself, the pros and cons are mentioned at:
-# https://guides.cocoapods.org/using/using-cocoapods.html#should-i-check-the-pods-directory-into-source-control
-#
-# Pods/
-#
-# Add this line if you want to avoid checking in source code from the Xcode workspace
-# *.xcworkspace
+# Template files
+/apps/bare-expo/android/app/google-services.json
+/apps/bare-expo/ios/BareExpo/GoogleService-Info.plist
 
-# Carthage
-#
-# Add this line if you want to avoid checking in source code from Carthage dependencies.
-# Carthage/Checkouts
+# Template projects
+templates/**/android/**/generated/*
+templates/**/android/app/build
+templates/**/Pods/**
+templates/**/Podfile.lock
+templates/**/yarn.lock
+templates/expo-template-bare-minimum/*.tgz
 
-Carthage/Build/
+# Codemod
+.codemod.bookmark
 
-# fastlane
-#
-# It is recommended to not store the screenshots in the git repo.
-# Instead, use fastlane to re-generate the screenshots whenever they are needed.
-# For more information about the recommended setup visit:
-# https://docs.fastlane.tools/best-practices/source-control/#source-control
+# Fastlane
+/*.cer
+/fastlane/report.xml
+/fastlane/Preview.html
+/fastlane/Deployment
+/fastlane/test_output
+/Preview.html
+/gc_keys.json
+/fastlane/gc_keys.json
 
-fastlane/report.xml
-fastlane/Preview.html
-fastlane/screenshots/**/*.png
-fastlane/test_output
+# CI
+/android/logcat.txt
+
+# Shell apps
+android-shell-app
+shellAppBase-*
+shellAppIntermediates
+shellAppWorkspaces
+/artifacts/*
+
+# Expo Client builds
+/client-builds
+
+# Expo web env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+apps/bare-expo/deploy-url.txt
+
+# Temporary files created by Metro to check the health of the file watcher
+.metro-health-check*
+
+# Expo Doc merging
+docs/pages/versions/*/react-native/ADDED_*.md
+docs/pages/versions/*/react-native/REMOVED_*.md
+docs/pages/versions/*/react-native/*.diff
+
+# Expo Go
+/apps/expo-go/src/dist
+
+# Prebuilds
+/packages/**/xcframeworks/
+/packages/**/*.spec.json
+/packages/**/Info-generated.plist
+/packages/**/.build/
+/packages/precompile/.cache/
+!crsqlite.xcframework
+
+# iOS
+**/ios/.xcode.env.local
+
+# TypeScript state
+*.tsbuildinfo
+
+# SWC cache outputs
+.swc/
+
+# Secrets - contains real secrets fetched from GCP
+/secrets/keys.json
+/secrets/expotools.env
