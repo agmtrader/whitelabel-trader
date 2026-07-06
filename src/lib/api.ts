@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://10.4.190.155:5000';
+const API_BASE_URL = 'http://localhost:5000';
 const REQUEST_TIMEOUT_MS = 30_000;
 
 export type AccountsResponse = {
