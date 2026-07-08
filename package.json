@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "dependencies": {
     "@expo/ui": "~57.0.3",
+    "@google-cloud/secret-manager": "^6.2.0",
     "expo": "~57.0.2",
     "expo-constants": "~57.0.3",
     "expo-device": "~57.0.0",
@@ -33,6 +34,8 @@
   },
   "scripts": {
     "start": "expo start",
+    "dev": "node ./scripts/dev.mjs",
+    "server": "node ./server/index.mjs",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo start --android",
     "ios": "expo start --ios",

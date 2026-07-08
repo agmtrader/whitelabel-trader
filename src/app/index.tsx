@@ -399,7 +399,7 @@ export default function TraderAppScreen() {
                 </View>
                 <Text style={styles.loginTitle}>Live IBKR session</Text>
                 <Text style={styles.loginSubtitle}>
-                  Sign in to load your real watchlists, quotes, charts, and open orders through AGM API.
+                  Sign in to load your real watchlists, quotes, charts, and open orders through the local IBKR trading server.
                 </Text>
               </View>
 
@@ -665,7 +665,7 @@ function WatchlistScreen({
       <SectionTitle title="Available lists" />
       <InfoCard>
         {watchlists.length === 0 ? (
-          <Text style={styles.emptyText}>No watchlists returned by the API.</Text>
+          <Text style={styles.emptyText}>No watchlists returned by the trading server.</Text>
         ) : (
           watchlists.map((watchlist, index) => (
             <View key={watchlist.id}>
@@ -806,7 +806,7 @@ function ActivityScreen({
           ))}
         </InfoCard>
       ) : (
-        <EmptyCard label="No open orders returned by the API." />
+        <EmptyCard label="No open orders returned by the trading server." />
       )}
     </ScrollView>
   );

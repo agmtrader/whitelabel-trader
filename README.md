@@ -16,6 +16,47 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npx expo start
    ```
 
+## Local IBKR trading server
+
+This app no longer needs `agm-api` for the IBKR trading screens. It now expects a small local server inside this repo.
+
+1. Create a local env file:
+
+   ```bash
+   cp .env.example .env.local
+   ```
+
+2. Set the required values in `.env.local`:
+
+   - `EXPO_PUBLIC_TRADER_API_BASE_URL`
+   - `TRADER_API_PORT`
+   - `GCLOUD_PROJECT` if you need something other than `agm-datalake`
+
+   By default the server now fetches `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY` from Google Secret Manager using the official Node client and your local Google credentials / ADC context.
+   You can still override it with `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY` or `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY_FILE` if needed.
+
+3. Start the trading server:
+
+   ```bash
+   npm run server
+   ```
+
+4. Start Expo in a separate terminal:
+
+   ```bash
+   npm run web
+   ```
+
+   Or start both together:
+
+   ```bash
+   npm run dev
+   ```
+
+If you run the app on a physical device, `EXPO_PUBLIC_TRADER_API_BASE_URL` must be set to your machine's LAN IP, not `localhost`.
+
+The server will fail fast if your local Google credentials cannot access Secret Manager.
+
 In the output, you'll find options to open the app in a
 
 - [development build](https://docs.expo.dev/develop/development-builds/introduction/)

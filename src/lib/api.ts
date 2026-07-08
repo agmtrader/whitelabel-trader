@@ -1,5 +1,6 @@
-const API_BASE_URL = 'http://localhost:5000';
+const API_BASE_URL = process.env.EXPO_PUBLIC_TRADER_API_BASE_URL || 'http://localhost:5100';
 const REQUEST_TIMEOUT_MS = 30_000;
+let traderSessionId: string | null = null;
 
 export type AccountsResponse = {
   accounts: string[];
@@ -8,11 +9,6 @@ export type AccountsResponse = {
     allowedAssetTypes: string;
   };
   selectedAccount: string;
-};
-
-type TokenResponse = {
-  access_token: string;
-  expires_in: number;
 };
 
 export type WatchlistSummary = {
@@ -119,30 +115,12 @@ async function fetchWithTimeout(input: string, init?: RequestInit) {
   }
 }
 
-async function fetchToken() {
-  const response = await fetchWithTimeout(`${API_BASE_URL}/token`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ token: 'all' }),
-  });
-
-  if (!response.ok) {
-    throw new APIError(`Token request failed with ${response.status}`, response.status);
-  }
-
-  return (await response.json()) as TokenResponse;
-}
-
 async function authorizedRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await fetchToken();
-
   const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token.access_token}`,
+      ...(traderSessionId ? { 'X-Trader-Session': traderSessionId } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -369,18 +347,28 @@ export async function fetchPublicIp() {
 
 export async function loginToBrokerage(credential: string) {
   const ip = await fetchPublicIp();
+  traderSessionId = null;
 
-  await authorizedRequest('/accounts/ibkr/sso/create', {
-    method: 'POST',
-    body: JSON.stringify({
-      credential,
-      ip,
-    }),
-  });
+  try {
+    const sessionPayload = await authorizedRequest<{ sessionId?: string }>('/accounts/ibkr/sso/create', {
+      method: 'POST',
+      body: JSON.stringify({
+        credential,
+        ip,
+      }),
+    });
+    if (!sessionPayload.sessionId) {
+      throw new APIError('Login response did not include a sessionId');
+    }
+    traderSessionId = sessionPayload.sessionId;
 
-  await authorizedRequest('/accounts/ibkr/sso/initialize', {
-    method: 'POST',
-  });
+    await authorizedRequest('/accounts/ibkr/sso/initialize', {
+      method: 'POST',
+    });
+  } catch (error) {
+    traderSessionId = null;
+    throw error;
+  }
 
   return ip;
 }
@@ -482,9 +470,13 @@ export async function searchSecurities(symbol: string, secType = 'STK') {
 }
 
 export async function logoutOfBrokerage() {
-  return authorizedRequest('/accounts/ibkr/sso/logout', {
-    method: 'POST',
-  });
+  try {
+    return await authorizedRequest('/accounts/ibkr/sso/logout', {
+      method: 'POST',
+    });
+  } finally {
+    traderSessionId = null;
+  }
 }
 
 export function getApiBaseUrl() {
