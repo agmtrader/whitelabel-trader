@@ -1,97 +1,50 @@
-# Welcome to your Expo app 👋
+# AGM Trader
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Expo 57 app for iOS, Android, and web. The Spanish mobile design uses a centered 430px canvas on desktop. Its three active tabs are **Inicio**, **Mercado**, and **Más**.
 
-## Get started
+The app uses the existing direct IBKR Trading Web API backend for FD login, brokerage session status, user/system watchlists, stock and ETF contract search, quote snapshots, instrument details, and historical charts. Quotes show the delivery state and provider update time. Missing fields remain `—`; there are no fixture prices or balances in the active interface. Stocks may be delayed according to the username's IBKR market-data permissions.
 
-1. Install dependencies
+Order tickets, portfolio, funding, notifications, and profile/security screens are deferred. The original brokerage screen is preserved at `/broker`; real orders and hosted/paper acceptance remain separate work in issues #3–#7.
 
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-## Local IBKR trading server
-
-This app no longer needs `agm-api` for the IBKR trading screens. It now expects a small local server inside this repo.
-
-1. Create a local env file:
-
-   ```bash
-   cp .env.example .env.local
-   ```
-
-2. Set the required values in `.env.local`:
-
-   - `EXPO_PUBLIC_TRADER_API_BASE_URL`
-   - `TRADER_API_PORT`
-   - `GCLOUD_PROJECT` if you need something other than `agm-datalake`
-
-   By default the server now fetches `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY` from Google Secret Manager using the official Node client and your local Google credentials / ADC context.
-   You can still override it with `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY` or `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY_FILE` if needed.
-
-3. Start the trading server:
-
-   ```bash
-   npm run server
-   ```
-
-4. Start Expo in a separate terminal:
-
-   ```bash
-   npm run web
-   ```
-
-   Or start both together:
-
-   ```bash
-   npm run dev
-   ```
-
-If you run the app on a physical device, `EXPO_PUBLIC_TRADER_API_BASE_URL` must be set to your machine's LAN IP, not `localhost`.
-
-The server will fail fast if your local Google credentials cannot access Secret Manager.
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Local development
 
 ```bash
-npm run reset-project
+npm install
+npm run server
+# In another terminal:
+npm run web
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+For a preview without a file watcher:
 
-### Other setup steps
+```bash
+npm run export:web
+npm run preview
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+Open http://localhost:8082/app/home and enter your IBKR username through **Conectar IBKR**. The export uses two Metro workers. The preview and API server bind to `127.0.0.1` by default; API port 5100 and preview port 8082.
 
-## Learn more
+The server fetches `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY` from Google Secret Manager using local Google credentials / ADC. Existing environment/private-key-file overrides remain supported. Configuration variables include `GCLOUD_PROJECT`, `TRADER_API_PORT`, `TRADER_API_HOST`, `PREVIEW_PORT`, and `EXPO_PUBLIC_TRADER_API_BASE_URL`. Never commit secrets. Provider OAuth/SSO tokens stay on the server; the browser receives an opaque application session ID held in memory. Reloading the app requires reconnecting.
 
-To learn more about developing your project with Expo, look at the following resources:
+The established FD initialization sends `publish: true, compete: true`, waits two seconds, and verifies brokerage accounts before the UI becomes connected. This preserves the original login behavior. IBKR permits one brokerage session per username, so connecting can replace that username's session on another IBKR platform. See the [official session documentation](https://www.interactivebrokers.com/docs/web-api/authentication/trading).
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+Snapshots prime requested fields once per subscription, merge partial updates, and refresh the visible list every five seconds while the app is active. Only this client's obsolete streams are released. Requests are paced, historical requests have a five-request concurrency limit, and session health is checked every minute.
 
-## Join the community
+For physical devices, use `npm run ios` or `npm run android` and configure the API base URL and server host for the development network. Native device acceptance remains separate from browser validation.
 
-Join our community of developers creating universal apps.
+## Validation
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+npm run typecheck
+npm test
+npx eslint src/features src/lib/api.ts src/lib/market-data.ts server tests
+npm run export:web
+```
+
+Tests protect source-data normalization, missing versus zero values, documented watchlist/search shapes, session headers, snapshot preflight and partial updates, upstream error propagation, stream ownership, and the established initialization flow. Full-repository lint still reports pre-existing hook violations in `/broker` and the starter web color-scheme hook, tracked in #6.
+
+Local browser validation on October 14, 2026 verified FD login, watchlists, stock/ETF search, actual quotes with delayed/real-time labels, and daily/monthly IBKR history. This is local validation; deployment, actual order execution, and physical-device acceptance are pending in their separate issues.
+
+## Design assets
+
+`assets/images/trader/` bundles AGM and instrument logos from the supplied public reference. Inter is bundled through `@expo-google-fonts/inter`. The original visual reference is https://agmt-mobile-prototype.pages.dev.
