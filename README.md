@@ -9,7 +9,7 @@ Order tickets, portfolio, funding, notifications, and profile/security screens a
 ## Local development
 
 ```bash
-npm install
+npm ci
 npm run server
 # In another terminal:
 npm run web
@@ -44,6 +44,12 @@ npm run export:web
 Tests protect source-data normalization, missing versus zero values, documented watchlist/search shapes, session headers, snapshot preflight and partial updates, upstream error propagation, stream ownership, and the established initialization flow. Full-repository lint still reports pre-existing hook violations in `/broker` and the starter web color-scheme hook, tracked in #6.
 
 Local browser validation on October 14, 2026 verified FD login, watchlists, stock/ETF search, actual quotes with delayed/real-time labels, and daily/monthly IBKR history. This is local validation; deployment, actual order execution, and physical-device acceptance are pending in their separate issues.
+
+## Dependency security
+
+The October 16, 2026 dependency refresh stays on Expo SDK 57 and aligns native packages with Expo's recommended versions. `npm ci` runs `scripts/patch-query-string.mjs` through `postinstall`; install scripts must run. This checked, idempotent patch preserves Expo Router's CommonJS interface while using the patched ESM URI decoder. Xcode's UUID and Metro overrides retain compatible APIs and remove vulnerable transitive versions. Recheck these overrides and remove the patch when upstream consumers support the fixed dependencies directly.
+
+The refreshed lockfile removes the vulnerable versions behind 49 of the 51 alerts captured that day, including the critical `shell-quote` alert. Two high-severity upstream findings remain: [node-forge signature verification](https://github.com/advisories/GHSA-86w9-cpqp-85rv), used by Expo CLI and its code-signing certificate tooling, and [braces recursion exhaustion](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm), pulled in by Metro's file watcher through micromatch. Neither has a published patched release as of October 16. Both remain tracked in [#15](https://github.com/agmtrader/whitelabel-trader/issues/15); this is not a clean security audit. GitHub alerts update only after the dependency change reaches the default branch and is rescanned.
 
 ## Design assets
 
