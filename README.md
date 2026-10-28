@@ -55,6 +55,10 @@ The October 28, 2026 refresh pins both Expo CLI and code-signing consumers to of
 
 Dependency remediation and GitHub's default-branch rescan are tracked in [#15](https://github.com/agmtrader/whitelabel-trader/issues/15). Local validation does not establish hosted or physical-device acceptance.
 
+The remaining October 28 high-severity [Zod advisory](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5) is addressed by pinning all consumers to official Zod 4.6.7. Its bounded-collection checks reject oversized input before validating every element. Expo CLI's plugin and MCP schemas and React Hooks' explicit Zod v4 integration are checked for compatibility; this override crosses Expo CLI's declared Zod v3 range.
+
+The low-severity [deepmerge prototype-poisoning advisory](https://github.com/advisories/GHSA-gcqx-w48m-w2h4) has no published fixed release. `scripts/patch-deepmerge.mjs` rejects `__proto__` in both merge loops across every locked copy's CommonJS, UMD and source distributions during `postinstall`. It checks the exact 4.3.1 version and source hashes, fails on drift or partial patches, and preserves ordinary configuration keys. Install scripts must run; `--ignore-scripts` skips this mitigation. The package remains version 4.3.1, so its version-based low-severity audit warning remains. Replace the backport with a compatible official fixed release when available.
+
 ## Design assets
 
 `assets/images/trader/` bundles AGM and instrument logos from the supplied public reference. Inter is bundled through `@expo-google-fonts/inter`. The original visual reference is https://agmt-mobile-prototype.pages.dev.
