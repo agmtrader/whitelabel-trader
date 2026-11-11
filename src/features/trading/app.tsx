@@ -14,6 +14,7 @@ import {
   SafeAreaView,
 } from "react-native-safe-area-context";
 import {
+  Link,
   useLocalSearchParams,
   usePathname,
   useRouter,
@@ -27,7 +28,6 @@ import {
   LogOut,
   Menu,
   RefreshCw,
-  Search,
   Sun,
   X,
 } from "lucide-react-native";
@@ -39,7 +39,7 @@ import {
   type MarketSnapshot,
 } from "@/lib/api";
 import { historyQueries, marketDelivery, text } from "@/lib/market-data";
-import { usePrototype } from "@/features/prototype/context";
+import { improsa, usePrototype } from "@/features/prototype/context";
 import {
   Brand,
   Button,
@@ -408,6 +408,7 @@ function Home({
   const { colors } = usePrototype(),
     trading = useTrading();
   const { instruments, status, watch } = trading;
+  const connected = status === "connected";
   useEffect(() => {
     if (status === "connected") watch(instruments);
   }, [instruments, status, watch]);
@@ -415,68 +416,78 @@ function Home({
     <>
       <LinearGradient
         colors={[colors.primary + "12", colors.bg]}
-        style={{ padding: 16, paddingBottom: 24 }}
+        style={{ padding: 16, paddingBottom: 24, gap: 16 }}
       >
-        <View style={[ui.row, { gap: 10, marginBottom: 20 }]}>
-          <Brand />
-          <View>
-            <Txt size={12} color={colors.muted}>
-              Hola,
-            </Txt>
-            <Txt weight={700}>{trading.username || "bienvenido"}</Txt>
-          </View>
-        </View>
+        <Brand />
+        {trading.username ? (
+          <Txt weight={600} color={colors.secondary}>
+            Hola, {trading.username}
+          </Txt>
+        ) : null}
         <LinearGradient
-          colors={["#f26c0d", "#cc5a08", "#a34700"]}
+          colors={[improsa.blue, improsa.navy, improsa.deepNavy]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={{ borderRadius: 16, padding: 20, gap: 8 }}
+          style={{
+            borderRadius: 16,
+            borderTopWidth: 3,
+            borderColor: improsa.gold,
+            padding: 24,
+            gap: 10,
+          }}
         >
-          <Txt size={12} color="#ffffffb3">
-            IBKR Trading API
-          </Txt>
-          <Txt size={26} weight={800} color="#fff">
-            {trading.status === "connected"
-              ? "Mercado conectado"
-              : "Tu próxima inversión"}
-          </Txt>
-          <Txt size={12} color="#ffffffb3">
-            {trading.status === "connected"
-              ? "Precios y gráficos desde tu sesión IBKR"
-              : "Información real para decidir mejor"}
-          </Txt>
-          <Button
-            label={
-              trading.status === "connected"
-                ? "Explorar mercado"
-                : "Conectar IBKR"
-            }
-            onPress={() =>
-              trading.status === "connected" ? go("market") : connect()
-            }
-            style={[
-              ui.row,
-              {
-                marginTop: 12,
-                justifyContent: "center",
-                padding: 12,
-                gap: 8,
-                backgroundColor: "#ffffff26",
-                borderRadius: 12,
-              },
-            ]}
+          <Txt
+            size={11}
+            weight={700}
+            color={improsa.lightGold}
+            style={{ letterSpacing: 1.5 }}
           >
-            <Search size={16} color="#fff" />
-            <Txt weight={600} color="#fff">
-              {trading.status === "connected"
-                ? "Explorar mercado"
-                : "Conectar IBKR"}
-            </Txt>
-          </Button>
+            IMPROSA VALORES
+          </Txt>
+          <Txt size={28} weight={800} color="#fff">
+            {connected ? "Mercado conectado" : "Tu próxima inversión"}
+          </Txt>
+          <Txt color="#dce7f5">
+            {connected
+              ? "Consultá precios, listas y gráficos desde tu sesión IBKR."
+              : "Solicitá tu cuenta para empezar a invertir con Improsa Valores."}
+          </Txt>
+          {connected ? (
+            <Button
+              onPress={() => go("market")}
+              style={[
+                ui.primary,
+                { marginTop: 8, backgroundColor: improsa.gold },
+              ]}
+            >
+              <Txt weight={700} color={improsa.deepNavy}>
+                Explorar mercado
+              </Txt>
+            </Button>
+          ) : (
+            <Link
+              href={improsa.applicationUrl}
+              target="_blank"
+              rel="noopener"
+              style={[
+                ui.primary,
+                {
+                  marginTop: 8,
+                  backgroundColor: improsa.gold,
+                  textAlign: "center",
+                  textDecorationLine: "none",
+                },
+              ]}
+            >
+              <Txt weight={700} color={improsa.deepNavy}>
+                Abrir una cuenta
+              </Txt>
+            </Link>
+          )}
         </LinearGradient>
       </LinearGradient>
       <View style={{ paddingHorizontal: 16 }}>
-        {trading.status === "connected" ? (
+        {connected ? (
           <>
             <Label>MIS LISTAS</Label>
             {trading.watchlists.length > 0 && (

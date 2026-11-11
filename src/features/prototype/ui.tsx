@@ -1,4 +1,5 @@
 import { useId, type PropsWithChildren } from "react";
+import { Image as ExpoImage } from "expo-image";
 import {
   Image,
   Pressable,
@@ -166,24 +167,26 @@ export function IconButton({
     </Button>
   );
 }
-export function Brand({
-  size = 32,
-  wordmark = false,
-}: {
-  size?: number;
-  wordmark?: boolean;
-}) {
+export function Brand() {
   return (
-    <Image
-      accessibilityLabel="AGM"
-      source={
-        wordmark
-          ? require("../../../assets/images/trader/logo-agm-light.png")
-          : require("../../../assets/images/trader/logo-agm-iso.png")
-      }
-      resizeMode="contain"
-      style={{ width: wordmark ? size * 3 : size, height: size }}
-    />
+    <View
+      style={{
+        alignSelf: "flex-start",
+        width: 248,
+        maxWidth: "100%",
+        borderRadius: 12,
+        backgroundColor: "#fff",
+        padding: 12,
+      }}
+    >
+      <ExpoImage
+        accessible
+        alt="Grupo Financiero Improsa · Improsa Valores Puesto de Bolsa"
+        source={require("../../../assets/images/trader/logo-improsa.webp")}
+        contentFit="contain"
+        style={{ width: "100%", aspectRatio: 256 / 65 }}
+      />
+    </View>
   );
 }
 export function StockLogo({
