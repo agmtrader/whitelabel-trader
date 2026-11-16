@@ -35,7 +35,8 @@ export class IBKRTradingAPI {
     this.baseUrl = config.baseUrl;
     this.privateKey = config.privateKey;
     this.credentials = config.credentials;
-    this.currentCredential = this.credentials.I6413690;
+    this.fdMasterAccount = config.fdMasterAccount || "I6413690";
+    this.currentCredential = this.credentials[this.fdMasterAccount];
     this.accessToken = null;
     this.accessTokenExpiresAt = 0;
     this.ssoToken = null;
@@ -75,8 +76,8 @@ export class IBKRTradingAPI {
     }
   }
 
-  resolveCredential(masterAccount = "I6413690") {
-    const normalized = String(masterAccount || "I6413690")
+  resolveCredential(masterAccount = this.fdMasterAccount) {
+    const normalized = String(masterAccount || this.fdMasterAccount)
       .trim()
       .toUpperCase();
     const credential = this.credentials[normalized];
@@ -134,11 +135,10 @@ export class IBKRTradingAPI {
       client_assertion_type:
         "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
       client_assertion: this.buildClientAssertion(),
-      scope:
-        "accounts.read accounts.write bank-instructions.read bank-instructions.write clients.read clients.write echo.read echo.write fee-templates.read fee-templates.write instructions.read instructions.write statements.read transfers.read transfers.write sso-sessions.write sso-browser-sessions.write",
+      scope: "sso-sessions.write",
     });
 
-    const response = await fetch(`${this.baseUrl}/oauth2/api/v1/token`, {
+    const response = await this.fetchTrading(`${this.baseUrl}/oauth2/api/v1/token`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -173,10 +173,10 @@ export class IBKRTradingAPI {
   }
 
   async createSsoSession(credential, ip) {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const token = await this.getBearerToken();
     const signedPayload = this.signRequest({ credential, ip });
-    const response = await fetch(`${this.baseUrl}/gw/api/v1/sso-sessions`, {
+    const response = await this.fetchTrading(`${this.baseUrl}/gw/api/v1/sso-sessions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -202,7 +202,7 @@ export class IBKRTradingAPI {
   }
 
   async initializeBrokerageSession() {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const response = await this.fetchTrading(
       `${this.baseUrl}/v1/api/iserver/auth/ssodh/init`,
       {
@@ -225,12 +225,6 @@ export class IBKRTradingAPI {
     }
 
     const result = await response.json();
-    console.info("[trader-server] IBKR initialization flags", {
-      authenticated: result.authenticated,
-      connected: result.connected,
-      competing: result.competing,
-      established: result.established,
-    });
     await sleep(2000);
     await this.getBrokerageAccounts();
     this.snapshotPrimedAt.clear();
@@ -239,7 +233,7 @@ export class IBKRTradingAPI {
   }
 
   async logout() {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const response = await this.fetchTrading(`${this.baseUrl}/v1/api/logout`, {
       method: "POST",
       headers: this.requireSsoHeaders(),
@@ -255,7 +249,7 @@ export class IBKRTradingAPI {
   }
 
   async getBrokerageAccounts() {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const url = `${this.baseUrl}/v1/api/iserver/accounts`;
     const headers = this.requireSsoHeaders();
     let payload = null;
@@ -357,7 +351,7 @@ export class IBKRTradingAPI {
   }
 
   async getAllWatchlists() {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     return this.requestIserverJson(
       "GET",
       `${this.baseUrl}/v1/api/iserver/watchlists`,
@@ -369,7 +363,7 @@ export class IBKRTradingAPI {
   }
 
   async getWatchlistInformation(watchlistId) {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     return this.requestIserverJson(
       "GET",
       `${this.baseUrl}/v1/api/iserver/watchlist?id=${encodeURIComponent(watchlistId)}`,
@@ -389,7 +383,7 @@ export class IBKRTradingAPI {
   }
 
   async readMarketDataSnapshot(conids) {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const desiredFields = [
       MarketDataField.SYMBOL,
       MarketDataField.COMPANY_NAME,
@@ -551,7 +545,7 @@ export class IBKRTradingAPI {
   }
 
   async readHistoricalMarketData(conid, period, bar) {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const url = new URL(`${this.baseUrl}/v1/api/iserver/marketdata/history`);
     url.searchParams.set("conid", conid);
     url.searchParams.set("period", period);
@@ -573,7 +567,7 @@ export class IBKRTradingAPI {
   }
 
   async getPortfolioAnalystPerformance(acctIds, freq) {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const response = await this.fetchTrading(
       `${this.baseUrl}/v1/api/pa/performance`,
       {
@@ -595,7 +589,7 @@ export class IBKRTradingAPI {
   }
 
   async getContractInfo(conid) {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const response = await this.fetchTrading(
       `${this.baseUrl}/v1/api/iserver/contract/${encodeURIComponent(conid)}/info`,
       {
@@ -614,7 +608,7 @@ export class IBKRTradingAPI {
   }
 
   async getOpenOrders() {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     return this.requestIserverJson(
       "GET",
       `${this.baseUrl}/v1/api/iserver/account/orders`,
@@ -637,15 +631,17 @@ export class IBKRTradingAPI {
         { statusCode: response.status },
       );
     const data = await response.json();
+    const status = data.iserver?.authStatus;
     return {
-      authenticated: data.iserver?.authStatus?.authenticated === true,
-      connected: data.iserver?.authStatus?.connected === true,
-      competing: data.iserver?.authStatus?.competing === true,
+      authenticated: status?.authenticated === true,
+      connected: status?.connected === true,
+      competing: status?.competing === true,
+      ...(typeof status?.established === "boolean" ? { established: status.established } : {}),
     };
   }
 
   async searchSecurities(symbol, secType = "STK", name = false) {
-    this.resolveCredential("I6413690");
+    this.resolveCredential();
     const response = await this.fetchTrading(
       `${this.baseUrl}/v1/api/iserver/secdef/search`,
       {

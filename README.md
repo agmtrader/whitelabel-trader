@@ -2,7 +2,7 @@
 
 Expo 57 app for iOS, Android, and web. The Spanish mobile design uses a centered 430px canvas on desktop. Its three active tabs are **Inicio**, **Mercado**, and **Más**.
 
-The app uses the existing direct IBKR Trading Web API backend for FD login, brokerage session status, user/system watchlists, stock and ETF contract search, quote snapshots, instrument details, and historical charts. Quotes show the delivery state and provider update time. Missing fields remain `—`; there are no fixture prices or balances in the active interface. Stocks may be delayed according to the username's IBKR market-data permissions.
+The app uses the existing direct IBKR Trading Web API backend for FD brokerage sessions, user/system watchlists, stock and ETF contract search, quote snapshots, instrument details, and historical charts. Enter your IBKR username to receive a one-time code at the email AGM verified for your linked account. Quotes show the delivery state and provider update time. Missing fields remain `—`. Stocks may be delayed according to the username's IBKR market-data permissions.
 
 Order tickets, portfolio, funding, notifications, and profile/security screens are deferred. The original brokerage screen is preserved at `/broker`; real orders and hosted/paper acceptance remain separate work in issues #3–#7.
 
@@ -22,11 +22,11 @@ npm run export:web
 npm run preview
 ```
 
-Open http://localhost:8082/app/home and enter your IBKR username through **Conectar IBKR**. The export uses two Metro workers. The preview and API server bind to `127.0.0.1` by default; API port 5100 and preview port 8082.
+Open http://localhost:8082/app/home, select **Conectar IBKR**, enter your IBKR username, and verify the code sent to your registered email. See [account access and deployment](docs/account-access.md) for local provisioning. The export uses two Metro workers. The preview and API server bind to `127.0.0.1` by default, on ports 8082 and 5100 respectively. The values in `.env.example` illustrate using API port 4002 instead.
 
-The server fetches `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY` from Google Secret Manager using local Google credentials / ADC. Existing environment/private-key-file overrides remain supported. Configuration variables include `GCLOUD_PROJECT`, `TRADER_API_PORT`, `TRADER_API_HOST`, `PREVIEW_PORT`, and `EXPO_PUBLIC_TRADER_API_BASE_URL`. Never commit secrets. Provider OAuth/SSO tokens stay on the server; the browser receives an opaque application session ID held in memory. Reloading the app requires reconnecting.
+The local server can fetch `IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY` from Google Secret Manager using local Google credentials or use a private-key file. Provider OAuth and SSO tokens stay in server memory. The app holds an opaque app session token in memory and asks for sign-in after a reload. A server restart with a durable session file preserves the app session and requires a fresh brokerage connection.
 
-The established FD initialization sends `publish: true, compete: true`, waits two seconds, and verifies brokerage accounts before the UI becomes connected. This preserves the original login behavior. IBKR permits one brokerage session per username, so connecting can replace that username's session on another IBKR platform. See the [official session documentation](https://www.interactivebrokers.com/docs/web-api/authentication/trading).
+The FD initialization sends `publish: true, compete: true`. The app shows a connected state after IBKR reports brokerage readiness and returns the linked account. IBKR permits one brokerage session per username, so connecting can replace that username's session on another IBKR platform. See the [official session documentation](https://www.interactivebrokers.com/docs/web-api/authentication/trading).
 
 Snapshots prime requested fields once per subscription, merge partial updates, and refresh the visible list every five seconds while the app is active. Only this client's obsolete streams are released. Requests are paced, historical requests have a five-request concurrency limit, and session health is checked every minute.
 

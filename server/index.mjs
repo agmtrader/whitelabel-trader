@@ -1,337 +1,559 @@
 import http from "node:http";
-import crypto from "node:crypto";
-import { Buffer } from "node:buffer";
-import { URL } from "node:url";
+import { pathToFileURL } from "node:url";
 
-import { loadConfig } from "./config.mjs";
+import {
+  createAccountAccess,
+  normalizeUsername,
+  orderBelongsToAccount,
+} from "./accountAccess.mjs";
 import { IBKRTradingAPI } from "./ibkrTradingApi.mjs";
+import { createLoginChallenges } from "./loginChallenges.mjs";
+import { createAgmLoginMailer, createLoginMailer } from "./loginMailer.mjs";
+import { createRequestSecurity, readJson } from "./security.mjs";
+import { createSessionStore } from "./sessionStore.mjs";
 
-const sessions = new Map();
+const prefix = "/accounts/ibkr";
+const appSessionPath = "/auth/session";
+const challengePath = "/auth/challenge";
+const messages = {
+  INVALID_LOGIN_CODE:
+    "El código es incorrecto o venció. Revisalo o solicitá otro.",
+  INVALID_USERNAME: "Ingresá un usuario IBKR válido.",
+  EMAIL_UNAVAILABLE: "El envío de códigos no está disponible en este momento.",
+  APP_SESSION_REQUIRED: "Iniciá sesión para continuar.",
+  BROKER_RECONNECT: "Reconectá IBKR para continuar.",
+  ACCOUNT_MISMATCH: "IBKR no confirmó la cuenta vinculada.",
+  RESOURCE_DENIED: "El recurso no está disponible para esta cuenta.",
+  400: "Solicitud inválida.",
+  403: "Solicitud no autorizada.",
+  404: "Recurso no encontrado.",
+  413: "Solicitud demasiado grande.",
+  415: "Formato de solicitud no admitido.",
+  429: "Demasiadas solicitudes. Intentá de nuevo en unos minutos.",
+  502: "IBKR no pudo completar la solicitud.",
+  504: "IBKR tardó demasiado en responder.",
+};
 
-function log(message, meta) {
-  const suffix = meta ? ` ${JSON.stringify(meta)}` : "";
-  console.log(`[trader-server] ${message}${suffix}`);
-}
-
-function logError(message, error, meta) {
-  const errorMessage = error instanceof Error ? error.message : String(error);
-  const payload = {
-    ...(meta || {}),
-    error: errorMessage,
-  };
-  console.error(`[trader-server] ${message} ${JSON.stringify(payload)}`);
+function failure(statusCode, code) {
+  return Object.assign(new Error(code), { statusCode, code });
 }
 
 function json(response, statusCode, payload) {
-  response.writeHead(statusCode, {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,X-Trader-Session",
-  });
-  response.end(JSON.stringify(payload));
-}
-
-function getSessionId(request) {
-  const header = request.headers["x-trader-session"];
-  return Array.isArray(header) ? header[0] : header;
-}
-
-async function readBody(request) {
-  const chunks = [];
-  for await (const chunk of request) {
-    chunks.push(chunk);
-  }
-
-  if (chunks.length === 0) {
-    return {};
-  }
-
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
-}
-
-function getSession(request) {
-  const sessionId = getSessionId(request);
-  if (!sessionId) {
-    throw Object.assign(new Error("Missing X-Trader-Session header"), {
-      statusCode: 401,
-    });
-  }
-
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw Object.assign(new Error("Unknown trading session"), {
-      statusCode: 401,
-    });
-  }
-
-  session.lastUsedAt = Date.now();
-  return { sessionId, session };
-}
-
-async function handleRequest(request, response) {
-  if (!request.url) {
-    json(response, 400, { error: "Missing request URL" });
-    return;
-  }
-
-  const url = new URL(
-    request.url,
-    `http://${request.headers.host || "localhost"}`,
-  );
-  log("Incoming request", {
-    method: request.method,
-    path: url.pathname,
-    hasSession: Boolean(getSessionId(request)),
-  });
-
-  if (request.method === "OPTIONS") {
-    response.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type,X-Trader-Session",
-    });
+  response.statusCode = statusCode;
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  if (payload === undefined) {
     response.end();
     return;
   }
-
-  if (request.method === "GET" && url.pathname === "/health") {
-    json(response, 200, { ok: true });
-    return;
-  }
-
-  try {
-    if (
-      request.method === "POST" &&
-      url.pathname === "/accounts/ibkr/sso/create"
-    ) {
-      const body = await readBody(request);
-      const credential = String(body.credential || "").trim();
-      const ip = String(body.ip || "").trim();
-      if (!credential || !ip) {
-        json(response, 400, { error: "Missing credential or ip" });
-        return;
-      }
-
-      const client = new IBKRTradingAPI(globalThis.__TRADER_SERVER_CONFIG__);
-      await client.createSsoSession(credential, ip);
-      const sessionId = crypto.randomUUID();
-      sessions.set(sessionId, {
-        client,
-        createdAt: Date.now(),
-        lastUsedAt: Date.now(),
-      });
-      log("Created trading session");
-      json(response, 200, { sessionId });
-      return;
-    }
-
-    if (
-      request.method === "POST" &&
-      url.pathname === "/accounts/ibkr/sso/initialize"
-    ) {
-      const { session } = getSession(request);
-      json(response, 200, await session.client.initializeBrokerageSession());
-      return;
-    }
-
-    if (
-      request.method === "POST" &&
-      url.pathname === "/accounts/ibkr/sso/logout"
-    ) {
-      const { sessionId, session } = getSession(request);
-      const payload = await session.client.logout();
-      sessions.delete(sessionId);
-      json(response, 200, payload);
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname === "/accounts/ibkr/sso/accounts"
-    ) {
-      const { session } = getSession(request);
-      json(response, 200, await session.client.getBrokerageAccounts());
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname === "/accounts/ibkr/sso/status"
-    ) {
-      const { session } = getSession(request);
-      json(response, 200, await session.client.tickle());
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname === "/accounts/ibkr/watchlists"
-    ) {
-      const { session } = getSession(request);
-      json(response, 200, await session.client.getAllWatchlists());
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname === "/accounts/ibkr/watchlist"
-    ) {
-      const { session } = getSession(request);
-      const id = String(url.searchParams.get("id") || "").trim();
-      if (!id) {
-        json(response, 400, { error: "Missing id" });
-        return;
-      }
-      json(response, 200, await session.client.getWatchlistInformation(id));
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname === "/accounts/ibkr/marketdata/snapshot"
-    ) {
-      const { session } = getSession(request);
-      const conids = String(url.searchParams.get("conids") || "").trim();
-      if (!conids) {
-        json(response, 400, { error: "Missing conids" });
-        return;
-      }
-      json(response, 200, await session.client.getMarketDataSnapshot(conids));
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname === "/accounts/ibkr/marketdata/history"
-    ) {
-      const { session } = getSession(request);
-      const conid = String(url.searchParams.get("conid") || "").trim();
-      const period = String(url.searchParams.get("period") || "").trim();
-      const bar = String(url.searchParams.get("bar") || "").trim();
-      if (!conid || !period || !bar) {
-        json(response, 400, { error: "Missing conid, period, or bar" });
-        return;
-      }
-      json(
-        response,
-        200,
-        await session.client.getHistoricalMarketData(conid, period, bar),
-      );
-      return;
-    }
-
-    if (
-      request.method === "POST" &&
-      url.pathname === "/accounts/ibkr/portfolio-analyst"
-    ) {
-      const { session } = getSession(request);
-      const body = await readBody(request);
-      json(
-        response,
-        200,
-        await session.client.getPortfolioAnalystPerformance(
-          body.acctIds || [],
-          body.freq,
-        ),
-      );
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname.startsWith("/accounts/ibkr/contract/")
-    ) {
-      const { session } = getSession(request);
-      const conid = url.pathname.replace("/accounts/ibkr/contract/", "").trim();
-      if (!conid) {
-        json(response, 400, { error: "Missing conid" });
-        return;
-      }
-      json(response, 200, await session.client.getContractInfo(conid));
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/accounts/ibkr/orders") {
-      const { session } = getSession(request);
-      json(response, 200, await session.client.getOpenOrders());
-      return;
-    }
-
-    if (
-      request.method === "POST" &&
-      url.pathname === "/accounts/ibkr/secdef/search"
-    ) {
-      const { session } = getSession(request);
-      const body = await readBody(request);
-      const symbol = String(body.symbol || "").trim();
-      const secType = String(body.secType || "STK").trim();
-      if (!symbol) {
-        json(response, 400, { error: "Missing symbol" });
-        return;
-      }
-      json(
-        response,
-        200,
-        await session.client.searchSecurities(
-          symbol,
-          secType,
-          body.name === true,
-        ),
-      );
-      return;
-    }
-
-    json(response, 404, { error: "Not found" });
-  } catch (error) {
-    const statusCode = Number(error?.statusCode || 500);
-    logError("Request failed", error, {
-      method: request.method,
-      path: url.pathname,
-      statusCode,
-    });
-    json(response, statusCode, {
-      error: error instanceof Error ? error.message : "Unknown server error",
-    });
-  }
+  response.setHeader("Content-Type", "application/json");
+  response.end(JSON.stringify(payload));
 }
 
-export async function startServer() {
-  log("Starting server bootstrap");
-  const config = await loadConfig();
-  globalThis.__TRADER_SERVER_CONFIG__ = config;
-  const port = config.port;
-  const server = http.createServer((request, response) => {
-    handleRequest(request, response);
-  });
+function log(event, metadata = {}) {
+  console.info(
+    JSON.stringify({ service: "trader-server", event, ...metadata }),
+  );
+}
 
-  server.on("error", (error) => {
-    logError("HTTP server error", error, { port });
-  });
+function requireKeys(body, keys) {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    Object.keys(body).some((key) => !keys.includes(key))
+  ) {
+    throw failure(400);
+  }
+  return body;
+}
 
-  server.listen(port, config.host || "127.0.0.1", () => {
-    log("Server listening", { port, url: `http://localhost:${port}` });
-  });
+function required(value) {
+  if (typeof value !== "string" || !value.trim()) throw failure(400);
+  return value.trim();
+}
 
+function isBrokerageReady(status) {
+  return (
+    status?.authenticated === true &&
+    status.connected === true &&
+    status.competing === false &&
+    status.established !== false
+  );
+}
+
+function ownedAccount(info, accountId) {
+  if (!Array.isArray(info?.accounts) || !info.accounts.includes(accountId)) {
+    throw failure(403, "ACCOUNT_MISMATCH");
+  }
+  const alias = info.aliases?.[accountId];
+  return {
+    accounts: [accountId],
+    selectedAccount: accountId,
+    aliases: {
+      [accountId]: typeof alias === "string" && alias ? alias : accountId,
+    },
+    allowFeatures: {
+      allowedAssetTypes:
+        typeof info.allowFeatures?.allowedAssetTypes === "string"
+          ? info.allowFeatures.allowedAssetTypes
+          : "",
+    },
+  };
+}
+
+function orderSummary(order, accountId) {
+  const fields = {
+    orderId: order.order_id ?? order.orderId ?? order.id,
+    ticker: order.ticker ?? order.symbol,
+    side: order.side,
+    status: order.status,
+    size: order.size ?? order.quantity,
+    price: order.price,
+    account: accountId,
+  };
+  return Object.fromEntries(
+    Object.entries(fields).filter(
+      ([, value]) => typeof value === "string" || Number.isFinite(value),
+    ),
+  );
+}
+
+function watchlistRows(payload) {
+  if (Array.isArray(payload)) return payload;
+  const { user_lists: userLists, system_lists: systemLists } =
+    payload?.data ?? {};
+  return [
+    ...(Array.isArray(userLists) ? userLists : []),
+    ...(Array.isArray(systemLists) ? systemLists : []),
+  ];
+}
+
+export function createTraderServer(
+  config,
+  {
+    createBroker = () => new IBKRTradingAPI(config),
+    sendLoginCode = config.agmMail
+      ? createAgmLoginMailer(config.agmMail)
+      : config.smtp
+        ? createLoginMailer(config.smtp)
+        : undefined,
+    now = Date.now,
+  } = {},
+) {
+  const accountAccess = createAccountAccess(config.accountLinks);
+  if (config.security.production && config.accountLinks.length === 0) {
+    throw new Error("Production requires verified account links");
+  }
+  if (config.security.production && !sendLoginCode) {
+    throw new Error("Production requires email delivery");
+  }
+  const loginChallenges = createLoginChallenges({
+    findAccount: accountAccess.findAccount,
+    sendLoginCode,
+    onDeliveryError: () => log("login_email_delivery_failed"),
+    now,
+  });
+  const security = createRequestSecurity(config.security, { now });
+  const sessions = createSessionStore({
+    filename: config.security.sessionFile,
+    idleMs: config.security.sessionIdleMs,
+    absoluteMs: config.security.sessionAbsoluteMs,
+    now,
+  });
+  const brokerages = new Map();
+  const lifecycle = new Map();
+
+  function serialize(subject, operation) {
+    const pending = (lifecycle.get(subject) ?? Promise.resolve()).then(
+      operation,
+    );
+    const settled = pending.catch(() => {});
+    lifecycle.set(subject, settled);
+    void settled.then(() => {
+      if (lifecycle.get(subject) === settled) lifecycle.delete(subject);
+    });
+    return pending;
+  }
+
+  async function remoteLogout(client) {
+    try {
+      await client.logout();
+    } catch {
+      log("broker_logout_failed");
+    }
+  }
+
+  function discardBrokerage(subject) {
+    const brokerage = brokerages.get(subject);
+    if (!brokerage) return;
+    brokerages.delete(subject);
+    void serialize(subject, () => remoteLogout(brokerage.client));
+  }
+
+  function clearExpiredBrokerages() {
+    sessions.prune();
+    for (const [subject, brokerage] of brokerages) {
+      if (!sessions.isActive(brokerage.sessionId)) discardBrokerage(subject);
+    }
+  }
+
+  const timer = setInterval(
+    () => {
+      try {
+        clearExpiredBrokerages();
+      } catch {
+        log("session_cleanup_failed");
+      }
+    },
+    Math.min(60_000, config.security.sessionIdleMs),
+  );
+  timer.unref();
+
+  function requireUser(request, signingOut) {
+    const token = request.headers["x-trader-session"];
+    const session = sessions.get(token, { touch: false });
+    const link = session && accountAccess.getLink(session.userId);
+    if (!link) {
+      if (signingOut) security.checkRate(request);
+      if (session) sessions.revoke(token);
+      throw failure(401, "APP_SESSION_REQUIRED");
+    }
+    if (!signingOut) security.checkUserRate(link.userId);
+    return { token, sessionId: session.id, link };
+  }
+
+  function assertActive(user) {
+    if (!sessions.isActive(user.sessionId))
+      throw failure(401, "APP_SESSION_REQUIRED");
+  }
+
+  function handleBrokerError(error, user) {
+    if ([401, 409].includes(error?.statusCode)) {
+      discardBrokerage(user.link.subject);
+      throw failure(409, "BROKER_RECONNECT");
+    }
+    const status = error?.statusCode;
+    throw failure([400, 403, 404, 429, 504].includes(status) ? status : 502);
+  }
+
+  async function connectBrokerage(request, user) {
+    const { link, sessionId } = user;
+    const ip = config.security.ibkrClientIp || security.getClientIp(request);
+    return serialize(link.subject, async () => {
+      assertActive(user);
+      const existing = brokerages.get(link.subject);
+      if (existing?.sessionId === sessionId) return existing.account;
+
+      const client = createBroker();
+      let ssoCreated = false;
+      try {
+        await client.createSsoSession(link.ibkrUsername, ip);
+        ssoCreated = true;
+        assertActive(user);
+        await client.initializeBrokerageSession();
+        const status = await client.tickle();
+        if (!isBrokerageReady(status)) throw failure(409, "BROKER_RECONNECT");
+        const account = {
+          ...ownedAccount(await client.getBrokerageAccounts(), link.accountId),
+          username: link.ibkrUsername,
+        };
+        assertActive(user);
+        brokerages.set(link.subject, { sessionId, client, account });
+        return account;
+      } catch (error) {
+        if (ssoCreated) await remoteLogout(client);
+        if (Object.hasOwn(messages, error?.code)) throw error;
+        handleBrokerError(error, user);
+      }
+    });
+  }
+
+  async function withBrokerage(user, operation) {
+    assertActive(user);
+    const brokerage = brokerages.get(user.link.subject);
+    if (brokerage?.sessionId !== user.sessionId)
+      throw failure(409, "BROKER_RECONNECT");
+    let payload;
+    try {
+      payload = await operation(brokerage.client, user.link.accountId);
+    } catch (error) {
+      assertActive(user);
+      if (
+        error?.code === "ACCOUNT_MISMATCH" &&
+        brokerages.get(user.link.subject) === brokerage
+      ) {
+        discardBrokerage(user.link.subject);
+      }
+      if (Object.hasOwn(messages, error?.code)) throw error;
+      if (error?.statusCode === 400) throw failure(400);
+      if (brokerages.get(user.link.subject) === brokerage)
+        handleBrokerError(error, user);
+      throw failure(409, "BROKER_RECONNECT");
+    }
+    assertActive(user);
+    if (brokerages.get(user.link.subject) !== brokerage)
+      throw failure(409, "BROKER_RECONNECT");
+    return payload;
+  }
+
+  const brokerRoutes = new Map([
+    [
+      "GET /sso/accounts",
+      async (client, accountId) =>
+        ownedAccount(await client.getBrokerageAccounts(), accountId),
+    ],
+    ["GET /sso/status", (client) => client.tickle()],
+    ["GET /watchlists", (client) => client.getAllWatchlists()],
+    [
+      "GET /watchlist",
+      async (client, _accountId, query) => {
+        const id = required(query.get("id"));
+        const lists = watchlistRows(await client.getAllWatchlists());
+        if (
+          !lists.some(
+            (list) =>
+              String(
+                list?.id ?? list?.watchlistId ?? list?.watchlist_id ?? "",
+              ) === id,
+          )
+        ) {
+          throw failure(403, "RESOURCE_DENIED");
+        }
+        return client.getWatchlistInformation(id);
+      },
+    ],
+    [
+      "GET /marketdata/snapshot",
+      (client, _accountId, query) =>
+        client.getMarketDataSnapshot(required(query.get("conids"))),
+    ],
+    [
+      "GET /marketdata/history",
+      (client, _accountId, query) =>
+        client.getHistoricalMarketData(
+          required(query.get("conid")),
+          required(query.get("period")),
+          required(query.get("bar")),
+        ),
+    ],
+    [
+      "GET /contract/:conid",
+      (client, _accountId, _query, _body, conid) =>
+        client.getContractInfo(conid),
+    ],
+    [
+      "GET /orders",
+      async (client, accountId) => {
+        const payload = await client.getOpenOrders();
+        const orders = Array.isArray(payload)
+          ? payload
+          : (payload?.orders ?? payload?.data);
+        if (!Array.isArray(orders)) throw failure(502);
+        return {
+          orders: orders
+            .filter((row) => orderBelongsToAccount(row, accountId))
+            .map((row) => orderSummary(row, accountId)),
+        };
+      },
+    ],
+    [
+      "POST /portfolio-analyst",
+      (client, accountId, _query, body) => {
+        const { acctIds, freq } = requireKeys(body, ["acctIds", "freq"]);
+        if (
+          !Array.isArray(acctIds) ||
+          acctIds.length !== 1 ||
+          acctIds[0] !== accountId
+        ) {
+          throw failure(403, "RESOURCE_DENIED");
+        }
+        return client.getPortfolioAnalystPerformance([accountId], freq);
+      },
+    ],
+    [
+      "POST /secdef/search",
+      (client, _accountId, _query, body) => {
+        const {
+          symbol,
+          secType = "STK",
+          name,
+        } = requireKeys(body, ["symbol", "secType", "name"]);
+        return client.searchSecurities(
+          required(symbol),
+          required(secType),
+          name === true,
+        );
+      },
+    ],
+  ]);
+
+  function matchRoute(request, pathname) {
+    if (pathname === challengePath && request.method === "POST")
+      return "request_code";
+    if (pathname === appSessionPath) {
+      if (request.method === "POST") return "sign_in";
+      if (request.method === "DELETE") return "sign_out";
+      return null;
+    }
+    if (!pathname.startsWith(prefix + "/")) return null;
+    const path = pathname.slice(prefix.length);
+    if (request.method === "POST" && path === "/sso/connect") return "connect";
+    const contract =
+      request.method === "GET" && /^\/contract\/(\d+)$/.exec(path);
+    const key = request.method + " " + (contract ? "/contract/:conid" : path);
+    if (brokerRoutes.has(key))
+      return { key, conid: contract ? contract[1] : undefined };
+    return null;
+  }
+
+  async function handle(request, response) {
+    let event = "unknown";
+    try {
+      const url = new URL(request.url, "http://localhost");
+      security.checkOrigin(request, response);
+      if (request.method === "GET" && url.pathname === "/health") {
+        json(response, 200, { ok: true });
+        return;
+      }
+      security.checkTransport(request);
+      if (request.method === "OPTIONS") {
+        security.checkRate(request);
+        security.preflight(request, response, ["GET", "POST", "DELETE"]);
+        return;
+      }
+
+      const route = matchRoute(request, url.pathname);
+      event = route?.key || route || "unknown";
+      const signingOut = route === "sign_out";
+      if (!signingOut)
+        security.checkRate(request, { login: route === "request_code" });
+      if (!route) throw failure(404);
+
+      if (route === "request_code") {
+        const body = requireKeys(
+          await readJson(request, config.security.maxBodyBytes),
+          ["username"],
+        );
+        const username = normalizeUsername(body.username);
+        if (!username) throw failure(400, "INVALID_USERNAME");
+        const challengeId = loginChallenges.request(username);
+        json(response, 202, { challengeId });
+        return;
+      }
+
+      if (route === "sign_in") {
+        const body = requireKeys(
+          await readJson(request, config.security.maxBodyBytes),
+          ["challengeId", "code"],
+        );
+        const link = loginChallenges.consume(body.challengeId, body.code);
+        if (!link) throw failure(401, "INVALID_LOGIN_CODE");
+        sessions.revokeUser(link.subject);
+        discardBrokerage(link.subject);
+        const { token } = sessions.create(link.subject);
+        json(response, 200, { sessionId: token });
+        return;
+      }
+
+      const user = requireUser(request, signingOut);
+      if (signingOut) {
+        sessions.revoke(user.token);
+        discardBrokerage(user.link.subject);
+        json(response, 204);
+        return;
+      }
+
+      const background = [
+        "GET /sso/status",
+        "GET /marketdata/snapshot",
+      ].includes(route.key);
+      if (!background && !sessions.get(user.token))
+        throw failure(401, "APP_SESSION_REQUIRED");
+      if (route === "connect") {
+        requireKeys(await readJson(request, config.security.maxBodyBytes), []);
+        json(response, 200, await connectBrokerage(request, user));
+        return;
+      }
+
+      const body =
+        request.method === "POST"
+          ? await readJson(request, config.security.maxBodyBytes)
+          : undefined;
+      const result = await withBrokerage(user, (client, accountId) =>
+        brokerRoutes.get(route.key)(
+          client,
+          accountId,
+          url.searchParams,
+          body,
+          route.conid,
+        ),
+      );
+      if (route.key === "GET /sso/status" && !isBrokerageReady(result)) {
+        discardBrokerage(user.link.subject);
+        throw failure(409, "BROKER_RECONNECT");
+      }
+      json(response, 200, result);
+    } catch (error) {
+      const status = Number(error?.statusCode);
+      const statusCode = status >= 400 && status <= 599 ? status : 500;
+      const code =
+        typeof error?.code === "string" && Object.hasOwn(messages, error.code)
+          ? error.code
+          : undefined;
+      log("request_failed", { route: event, statusCode });
+      if (!response.headersSent) {
+        if (error?.closeConnection) response.setHeader("Connection", "close");
+        if (Number.isSafeInteger(error?.retryAfter)) {
+          response.setHeader("Retry-After", String(error.retryAfter));
+        }
+        json(response, statusCode, {
+          error:
+            messages[code] ??
+            messages[statusCode] ??
+            "No se pudo completar la solicitud.",
+          ...(code ? { code } : {}),
+        });
+      }
+    }
+  }
+
+  const server = http.createServer(
+    {
+      requestTimeout: config.security.requestTimeoutMs,
+      headersTimeout: Math.min(10_000, config.security.requestTimeoutMs),
+      maxHeaderSize: 8192,
+    },
+    (request, response) => void handle(request, response),
+  );
+  server.on("close", () => {
+    clearInterval(timer);
+    sessions.close();
+  });
   return server;
 }
 
-process.on("unhandledRejection", (error) => {
-  logError("Unhandled rejection", error);
-});
-
-process.on("uncaughtException", (error) => {
-  logError("Uncaught exception", error);
-});
+export async function startServer() {
+  const { loadConfig } = await import("./config.mjs");
+  const config = await loadConfig();
+  const server = createTraderServer(config);
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(config.port, config.host, resolve);
+  });
+  log("server_ready", { port: config.port });
+  return server;
+}
 
 if (
   process.argv[1] &&
-  new URL(`file://${process.argv[1]}`).pathname ===
-    new URL(import.meta.url).pathname
+  pathToFileURL(process.argv[1]).href === import.meta.url
 ) {
   startServer().catch((error) => {
-    logError("Startup failed", error);
-    process.exit(1);
+    const setting = /^(?:Missing|Invalid) ([A-Z][A-Z_0-9]+)$/.exec(
+      error?.message,
+    )?.[1];
+    log("startup_failed", setting ? { setting } : {});
+    process.exitCode = 1;
   });
 }

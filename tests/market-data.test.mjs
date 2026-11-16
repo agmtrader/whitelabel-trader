@@ -9,13 +9,15 @@ import {
 } from "../src/lib/market-data.ts";
 import {
   APIError,
-  clearBrokerageSession,
+  clearAppSession,
+  connectBrokerage,
   fetchBrokerageAccounts,
   fetchMarketSnapshots,
   fetchWatchlistDetail,
   fetchWatchlists,
-  loginToBrokerage,
-  logoutOfBrokerage,
+  requestTraderSignIn,
+  signInToTrader,
+  signOutOfTrader,
   searchSecurities,
 } from "../src/lib/api.ts";
 
@@ -101,14 +103,18 @@ test("real client boundary sends the session header and normalizes IBKR watchlis
   t.mock.method(globalThis, "fetch", async (url, init) => {
     seen.push({ url: String(url), init });
     const path = new URL(String(url)).pathname;
+    if (path === "/auth/session" && init.method === "DELETE") {
+      return new Response(null, { status: 204 });
+    }
     let payload;
-    if (String(url).startsWith("https://api.ipify.org"))
-      payload = { ip: "203.0.113.10" };
-    else if (path.endsWith("/sso/create"))
+    if (path === "/auth/challenge")
+      return Response.json(
+        { challengeId: "fixture-challenge" },
+        { status: 202 },
+      );
+    if (path === "/auth/session" && init.method === "POST")
       payload = { sessionId: "fixture-session" };
-    else if (path.endsWith("/sso/initialize"))
-      payload = { authenticated: true };
-    else if (path.endsWith("/sso/accounts"))
+    else if (path.endsWith("/sso/connect") || path.endsWith("/sso/accounts"))
       payload = {
         accounts: ["DUFIXTURE"],
         selectedAccount: "DUFIXTURE",
@@ -159,7 +165,20 @@ test("real client boundary sends the session header and normalizes IBKR watchlis
     else payload = { ok: true };
     return Response.json(payload);
   });
-  await loginToBrokerage("fixture-user");
+  const challengeId = await requestTraderSignIn("fixture-user");
+  await signInToTrader({ challengeId, code: "12345678" });
+  await connectBrokerage();
+  assert.deepEqual(JSON.parse(seen[0].init.body), {
+    username: "fixture-user",
+  });
+  assert.equal(seen[0].init.headers["X-Trader-Session"], undefined);
+  assert.deepEqual(JSON.parse(seen[1].init.body), {
+    challengeId,
+    code: "12345678",
+  });
+  assert.equal(seen[1].init.headers["X-Trader-Session"], undefined);
+  assert.deepEqual(JSON.parse(seen[2].init.body), {});
+  assert.equal(seen[2].init.headers["X-Trader-Session"], "fixture-session");
   assert.equal((await fetchBrokerageAccounts()).selectedAccount, "DUFIXTURE");
   assert.equal((await fetchWatchlists())[0].name, "Personal");
   assert.equal((await fetchWatchlistDetail("u")).instruments[0].conid, "8314");
@@ -172,10 +191,12 @@ test("real client boundary sends the session header and normalizes IBKR watchlis
   const search = seen.find((row) => row.url.endsWith("/secdef/search"));
   assert.equal(search.init.headers["X-Trader-Session"], "fixture-session");
   assert.equal(JSON.parse(search.init.body).name, true);
-  await logoutOfBrokerage();
+  await signOutOfTrader();
+  assert.equal(new URL(seen.at(-1).url).pathname, "/auth/session");
+  assert.equal(seen.at(-1).init.method, "DELETE");
 });
 test("upstream request failures remain explicit and never return fixture quotes", async (t) => {
-  clearBrokerageSession();
+  clearAppSession();
   t.mock.method(globalThis, "fetch", async () =>
     Response.json({ error: "Missing market data permission" }, { status: 403 }),
   );

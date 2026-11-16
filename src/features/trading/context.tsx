@@ -10,14 +10,15 @@ import {
 import { AppState } from "react-native";
 import {
   APIError,
-  clearBrokerageSession,
-  fetchBrokerageAccounts,
+  clearAppSession,
+  connectBrokerage,
   fetchBrokerageStatus,
   fetchMarketSnapshots,
   fetchWatchlistDetail,
   fetchWatchlists,
-  loginToBrokerage,
-  logoutOfBrokerage,
+  signInToTrader,
+  signOutOfTrader,
+  type TraderLoginProof,
   type AccountsResponse,
   type MarketSnapshot,
   type WatchlistInstrument,
@@ -29,6 +30,8 @@ type Status = "disconnected" | "connecting" | "connected" | "expired";
 function useTradingState() {
   const [mode, setMode] = useState<"ibkr" | "demo">("ibkr");
   const [status, setStatus] = useState<Status>("disconnected");
+  const [signedIn, setSignedIn] = useState(false);
+  const [sessionVersion, setSessionVersion] = useState(0);
   const [accounts, setAccounts] = useState<AccountsResponse | null>(null);
   const [username, setUsername] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -47,12 +50,29 @@ function useTradingState() {
   const quoteBusy = useRef(false);
   const snapshotIds = useRef<string[]>([]);
   const connected = useRef(false);
+  const connecting = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
     };
+  }, []);
+  const resetBrokerage = useCallback(() => {
+    connected.current = false;
+    generation.current++;
+    quoteBusy.current = false;
+    snapshotIds.current = [];
+    setSessionVersion(generation.current);
+    setAccounts(null);
+    setUsername("");
+    setSnapshots({});
+    setContracts({});
+    setInstruments([]);
+    setWatchlists([]);
+    setWatchlistId(null);
+    setBusy(false);
+    setQuoteError(null);
   }, []);
   const remember = useCallback(
     (items: TradingInstrument[]) =>
@@ -62,23 +82,31 @@ function useTradingState() {
       })),
     [],
   );
-  const fail = useCallback((caught: unknown) => {
-    const message =
-      caught instanceof Error ? caught.message : "Error de conexión IBKR";
-    if (
-      caught instanceof APIError &&
-      [401, 409].includes(caught.statusCode || 0)
-    ) {
-      connected.current = false;
-      generation.current++;
-      clearBrokerageSession();
-      setStatus("expired");
-      setAccounts(null);
-      setSnapshots({});
-      setError(message);
-    }
-    return message;
-  }, []);
+  const fail = useCallback(
+    (caught: unknown) => {
+      const message =
+        caught instanceof Error ? caught.message : "Error de conexión IBKR";
+      if (
+        caught instanceof APIError &&
+        caught.code === "APP_SESSION_REQUIRED"
+      ) {
+        resetBrokerage();
+        clearAppSession();
+        setSignedIn(false);
+        setStatus("expired");
+        setError(message);
+      } else if (
+        caught instanceof APIError &&
+        ["BROKER_RECONNECT", "ACCOUNT_MISMATCH"].includes(caught.code ?? "")
+      ) {
+        resetBrokerage();
+        setStatus("expired");
+        setError(message);
+      }
+      return message;
+    },
+    [resetBrokerage],
+  );
   const refreshQuotes = useCallback(
     async (ids?: string[]) => {
       const targets = ids || snapshotIds.current;
@@ -97,7 +125,7 @@ function useTradingState() {
         if (run === generation.current && mounted.current)
           setQuoteError(fail(caught));
       } finally {
-        quoteBusy.current = false;
+        if (run === generation.current) quoteBusy.current = false;
       }
     },
     [fail],
@@ -126,63 +154,58 @@ function useTradingState() {
     },
     [fail, refreshQuotes, remember],
   );
-  const connect = async (credential: string) => {
-    if (status === "connecting" || !credential.trim()) return false;
-    const run = ++generation.current;
-    connected.current = false;
+  const connect = async (proof?: TraderLoginProof) => {
+    if (connecting.current || (!signedIn && !proof)) return false;
+    connecting.current = true;
+    resetBrokerage();
+    const run = generation.current;
     setStatus("connecting");
     setError(null);
-    setQuoteError(null);
-    setSnapshots({});
-    setContracts({});
-    setInstruments([]);
-    setWatchlists([]);
-    setAccounts(null);
     try {
-      await loginToBrokerage(credential.trim());
-      const info = await fetchBrokerageAccounts();
+      if (!signedIn && proof) {
+        await signInToTrader(proof);
+        if (run !== generation.current || !mounted.current) return false;
+        setSignedIn(true);
+      }
+      const info = await connectBrokerage();
       if (run !== generation.current || !mounted.current) return false;
       connected.current = true;
       setAccounts(info);
-      setUsername(credential.trim());
-      setStatus("connected");
+      setUsername(info.username);
       setMode("ibkr");
       try {
         const lists = await fetchWatchlists();
-        if (run !== generation.current) return true;
+        if (run !== generation.current) return false;
         setWatchlists(lists);
         const first = lists.find((item) => !item.readOnly) || lists[0];
         if (first) await selectWatchlist(first.id);
       } catch (caught) {
         if (run === generation.current) setError(fail(caught));
       }
+      if (run !== generation.current || !mounted.current) return false;
+      setStatus("connected");
       return true;
     } catch (caught) {
       if (run === generation.current && mounted.current) {
-        clearBrokerageSession();
-        connected.current = false;
         setStatus("disconnected");
         setError(fail(caught));
       }
       return false;
+    } finally {
+      connecting.current = false;
     }
   };
   const disconnect = async () => {
-    connected.current = false;
-    generation.current++;
-    snapshotIds.current = [];
-    setSnapshots({});
-    setContracts({});
-    setInstruments([]);
-    setWatchlists([]);
-    setAccounts(null);
-    setUsername("");
+    if (connecting.current) return;
+    resetBrokerage();
+    setSignedIn(false);
     setStatus("disconnected");
     setError(null);
-    setQuoteError(null);
     try {
-      await logoutOfBrokerage();
+      await signOutOfTrader();
     } catch (caught) {
+      if (caught instanceof APIError && caught.code === "APP_SESSION_REQUIRED")
+        return;
       setError(
         caught instanceof Error
           ? caught.message
@@ -204,7 +227,7 @@ function useTradingState() {
       if (AppState.currentState === "active") void refreshQuotes();
     }, 5000);
     let running = false;
-    const keepalive = setInterval(async () => {
+    const checkStatus = async () => {
       if (AppState.currentState !== "active" || running) return;
       running = true;
       const run = generation.current;
@@ -216,6 +239,7 @@ function useTradingState() {
             new APIError(
               "La sesión IBKR expiró o está en uso en otra plataforma. Reconectá para continuar.",
               409,
+              "BROKER_RECONNECT",
             ),
           );
         }
@@ -225,16 +249,23 @@ function useTradingState() {
       } finally {
         running = false;
       }
-    }, 60_000);
+    };
+    const keepalive = setInterval(checkStatus, 60_000);
+    const appState = AppState.addEventListener("change", (next) => {
+      if (next === "active") void checkStatus();
+    });
     return () => {
       clearInterval(timer);
       clearInterval(keepalive);
+      appState.remove();
     };
   }, [status, mode, fail, refreshQuotes]);
   return {
     mode,
     setMode,
     status,
+    signedIn,
+    sessionVersion,
     accounts,
     username,
     error,
@@ -248,6 +279,8 @@ function useTradingState() {
     connect,
     disconnect,
     selectWatchlist,
+    handleApiError: fail,
+    clearError: () => setError(null),
     remember,
     watch,
     refreshQuotes,

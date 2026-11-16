@@ -18,6 +18,8 @@ export type AccountsResponse = {
   selectedAccount: string;
 };
 
+export type BrokerageConnection = AccountsResponse & { username: string };
+
 export type WatchlistSummary = {
   id: string;
   name: string;
@@ -76,11 +78,13 @@ export type ContractInfo = Record<string, unknown>;
 
 export class APIError extends Error {
   statusCode?: number;
+  code?: string;
 
-  constructor(message: string, statusCode?: number) {
+  constructor(message: string, statusCode?: number, code?: string) {
     super(message);
     this.name = "APIError";
     this.statusCode = statusCode;
+    this.code = code;
   }
 }
 
@@ -107,21 +111,25 @@ async function fetchWithTimeout(input: string, init?: RequestInit) {
 async function authorizedRequest<T>(
   path: string,
   init?: RequestInit,
+  sessionId = traderSessionId,
 ): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      ...(traderSessionId ? { "X-Trader-Session": traderSessionId } : {}),
+      ...(sessionId ? { "X-Trader-Session": sessionId } : {}),
       ...(init?.headers ?? {}),
     },
   });
 
   if (!response.ok) {
-    const body = await response.text();
+    const body = asRecord(await response.json().catch(() => null));
     throw new APIError(
-      `Request to ${path} failed with ${response.status}${body ? `: ${body}` : ""}`,
+      typeof body.error === "string"
+        ? body.error
+        : `Error de conexión (${response.status}).`,
       response.status,
+      typeof body.code === "string" ? body.code : undefined,
     );
   }
 
@@ -129,7 +137,11 @@ async function authorizedRequest<T>(
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  const payload = (await response.json()) as T;
+  if (sessionId && sessionId !== traderSessionId) {
+    throw new APIError("La sesión cambió durante la solicitud.");
+  }
+  return payload;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -280,49 +292,33 @@ function normalizeOrders(rawValue: unknown): OpenOrder[] {
   return orders;
 }
 
-export async function fetchPublicIp() {
-  const response = await fetchWithTimeout("https://api.ipify.org?format=json");
-
-  if (!response.ok) {
-    throw new APIError(
-      `Public IP request failed with ${response.status}`,
-      response.status,
-    );
-  }
-
-  const payload = (await response.json()) as { ip: string };
-  return payload.ip;
+export async function requestTraderSignIn(username: string) {
+  const { challengeId } = await authorizedRequest<{ challengeId?: string }>(
+    "/auth/challenge",
+    { method: "POST", body: JSON.stringify({ username }) },
+    null,
+  );
+  if (!challengeId) throw new APIError("No se pudo solicitar el código.");
+  return challengeId;
 }
 
-export async function loginToBrokerage(credential: string) {
-  const ip = await fetchPublicIp();
-  traderSessionId = null;
+export type TraderLoginProof = { challengeId: string; code: string };
 
-  try {
-    const sessionPayload = await authorizedRequest<{ sessionId?: string }>(
-      "/accounts/ibkr/sso/create",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          credential,
-          ip,
-        }),
-      },
-    );
-    if (!sessionPayload.sessionId) {
-      throw new APIError("Login response did not include a sessionId");
-    }
-    traderSessionId = sessionPayload.sessionId;
+export async function signInToTrader(proof: TraderLoginProof) {
+  const { sessionId } = await authorizedRequest<{ sessionId?: string }>(
+    "/auth/session",
+    { method: "POST", body: JSON.stringify(proof) },
+    null,
+  );
+  if (!sessionId) throw new APIError("No se pudo iniciar sesión.");
+  traderSessionId = sessionId;
+}
 
-    await authorizedRequest("/accounts/ibkr/sso/initialize", {
-      method: "POST",
-    });
-  } catch (error) {
-    traderSessionId = null;
-    throw error;
-  }
-
-  return ip;
+export function connectBrokerage() {
+  return authorizedRequest<BrokerageConnection>("/accounts/ibkr/sso/connect", {
+    method: "POST",
+    body: "{}",
+  });
 }
 
 export async function fetchBrokerageAccounts() {
@@ -442,13 +438,11 @@ export async function searchSecurities(
   return normalizeSearchResults(payload);
 }
 
-export async function logoutOfBrokerage() {
-  try {
-    return await authorizedRequest("/accounts/ibkr/sso/logout", {
-      method: "POST",
-    });
-  } finally {
-    traderSessionId = null;
+export async function signOutOfTrader() {
+  const sessionId = traderSessionId;
+  clearAppSession();
+  if (sessionId) {
+    await authorizedRequest("/auth/session", { method: "DELETE" }, sessionId);
   }
 }
 
@@ -456,16 +450,14 @@ export function getApiBaseUrl() {
   return API_BASE_URL;
 }
 
-export function clearBrokerageSession() {
+export function clearAppSession() {
   traderSessionId = null;
-}
-export function hasBrokerageSession() {
-  return traderSessionId !== null;
 }
 export async function fetchBrokerageStatus() {
   return authorizedRequest<{
     authenticated: boolean;
     connected: boolean;
     competing: boolean;
+    established?: boolean;
   }>("/accounts/ibkr/sso/status");
 }

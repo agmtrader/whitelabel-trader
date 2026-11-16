@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -11,20 +11,24 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useEmailLogin } from '@/hooks/use-email-login';
 
 import {
   type AccountsResponse,
   APIError,
+  clearAppSession,
+  connectBrokerage,
   type ContractInfo,
   fetchBrokerageAccounts,
+  fetchBrokerageStatus,
   fetchContractInfo,
   fetchHistoricalMarketData,
   fetchMarketSnapshots,
   fetchOpenOrders,
   fetchWatchlistDetail,
   fetchWatchlists,
-  loginToBrokerage,
-  logoutOfBrokerage,
+  signInToTrader,
+  signOutOfTrader,
   type MarketSnapshot,
   type OpenOrder,
   searchSecurities,
@@ -61,9 +65,10 @@ const HISTORY_QUERY: Record<RangeKey, { period: string; bar: string }> = {
 };
 
 export default function TraderAppScreen() {
-  const [credential, setCredential] = useState('');
+  const login = useEmailLogin();
+  const { reset: resetLogin } = login;
+  const [appSignedIn, setAppSignedIn] = useState(false);
   const [accountsInfo, setAccountsInfo] = useState<AccountsResponse | null>(null);
-  const [publicIp, setPublicIp] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('home');
   const [selectedWatchlistId, setSelectedWatchlistId] = useState<string | null>(null);
   const [selectedInstrument, setSelectedInstrument] = useState<QuoteInstrument | null>(null);
@@ -83,6 +88,47 @@ export default function TraderAppScreen() {
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [isPositionLoading, setIsPositionLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const clearAccountData = useCallback(() => {
+    setAccountsInfo(null);
+    setSelectedInstrument(null);
+    setSelectedWatchlistId(null);
+    setWatchlists([]);
+    setWatchlistDetail(null);
+    setSnapshotsByConid({});
+    setFeaturedHistory([]);
+    setSelectedHistory([]);
+    setSelectedContract(null);
+    setOpenOrders([]);
+    setSearchResults([]);
+    setSearchQuery('');
+    resetLogin();
+    setAppSignedIn(false);
+    setActiveTab('home');
+  }, [resetLogin]);
+
+  const clearExpiredAccount = useCallback((caughtError: unknown) => {
+    if (caughtError instanceof APIError &&
+        ['APP_SESSION_REQUIRED', 'BROKER_RECONNECT', 'ACCOUNT_MISMATCH'].includes(caughtError.code ?? '')) {
+      clearAppSession();
+      clearAccountData();
+      setError(caughtError.message);
+    }
+  }, [clearAccountData]);
+
+  useEffect(() => {
+    if (!accountsInfo) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      fetchBrokerageStatus().catch((caughtError) => {
+        if (!cancelled) clearExpiredAccount(caughtError);
+      });
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [accountsInfo, clearExpiredAccount]);
 
   const selectedAlias = useMemo(() => {
     if (!accountsInfo) {
@@ -162,21 +208,30 @@ export default function TraderAppScreen() {
   }
 
   async function handleLogin() {
-    const trimmedCredential = credential.trim();
-    if (!trimmedCredential || isLoading) {
+    if (!loginReady || loginBusy) return;
+    setError(null);
+    if (!appSignedIn && !login.challengeId) {
+      await login.requestCode();
       return;
     }
 
     setIsLoading(true);
-    setError(null);
 
     try {
-      const ip = await loginToBrokerage(trimmedCredential);
-      const accounts = await fetchBrokerageAccounts();
-      setPublicIp(ip);
+      if (!appSignedIn) {
+        const proof = { challengeId: login.challengeId, code: login.code };
+        login.setCode('');
+        await signInToTrader(proof);
+        setAppSignedIn(true);
+        resetLogin();
+      }
+      const accounts = await connectBrokerage();
       setAccountsInfo(accounts);
       await loadDashboard(accounts);
     } catch (caughtError) {
+      if (caughtError instanceof APIError && caughtError.code === 'APP_SESSION_REQUIRED') {
+        clearExpiredAccount(caughtError);
+      }
       const message =
         caughtError instanceof APIError || caughtError instanceof Error
           ? caughtError.message
@@ -187,6 +242,10 @@ export default function TraderAppScreen() {
       setIsLoading(false);
     }
   }
+
+  const loginBusy = isLoading || login.sending;
+  const loginReady = appSignedIn || (login.challengeId ? login.canVerify : Boolean(login.username.trim()));
+  const loginError = login.error || error;
 
   async function handleRefreshSession() {
     if (!accountsInfo || isLoading) {
@@ -201,6 +260,7 @@ export default function TraderAppScreen() {
       setAccountsInfo(refreshedAccounts);
       await loadDashboard(refreshedAccounts);
     } catch (caughtError) {
+      clearExpiredAccount(caughtError);
       const message =
         caughtError instanceof APIError || caughtError instanceof Error
           ? caughtError.message
@@ -219,22 +279,10 @@ export default function TraderAppScreen() {
     setIsLoading(true);
     setError(null);
 
+    clearAccountData();
+
     try {
-      await logoutOfBrokerage();
-      setAccountsInfo(null);
-      setPublicIp(null);
-      setSelectedInstrument(null);
-      setWatchlists([]);
-      setWatchlistDetail(null);
-      setSnapshotsByConid({});
-      setFeaturedHistory([]);
-      setSelectedHistory([]);
-      setSelectedContract(null);
-      setOpenOrders([]);
-      setSearchResults([]);
-      setSearchQuery('');
-      setCredential('');
-      setActiveTab('home');
+      await signOutOfTrader();
     } catch (caughtError) {
       const message =
         caughtError instanceof APIError || caughtError instanceof Error
@@ -404,32 +452,53 @@ export default function TraderAppScreen() {
               </View>
 
               <View style={styles.loginCard}>
-                <Text style={styles.inputLabel}>IBKR credential</Text>
-                <TextInput
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  editable={!isLoading}
-                  onChangeText={setCredential}
-                  placeholder="Username or credential"
-                  placeholderTextColor="#94A3B8"
-                  style={styles.loginInput}
-                  value={credential}
-                />
+                {!appSignedIn && <>
+                  <Text style={styles.inputLabel}>{login.challengeId ? 'Sign-in code' : 'IBKR username'}</Text>
+                  <TextInput
+                    key={login.challengeId ? 'code' : 'username'}
+                    accessibilityLabel={login.challengeId ? 'Sign-in code' : 'IBKR username'}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete={login.challengeId ? 'one-time-code' : 'username'}
+                    keyboardType={login.challengeId ? 'number-pad' : 'default'}
+                    maxLength={login.challengeId ? 8 : 64}
+                    editable={!loginBusy}
+                    onChangeText={login.challengeId ? login.setCode : login.setUsername}
+                    placeholder={login.challengeId ? '8-digit code' : 'IBKR username'}
+                    placeholderTextColor="#94A3B8"
+                    style={styles.loginInput}
+                    value={login.challengeId ? login.code : login.username}
+                    onSubmitEditing={() => void handleLogin()}
+                  />
+                  {login.challengeId ? (
+                    <Text style={styles.inputLabel}>If your username is registered, check the email on file for an 8-digit code.</Text>
+                  ) : null}
+                </>}
                 <Pressable
-                  disabled={isLoading || credential.trim().length === 0}
+                  disabled={loginBusy || !loginReady}
                   onPress={handleLogin}
                   style={({ pressed }) => [
                     styles.primaryButton,
-                    (pressed || isLoading || credential.trim().length === 0) && styles.buttonPressed,
+                    (pressed || loginBusy || !loginReady) && styles.buttonPressed,
                   ]}
                 >
-                  {isLoading ? (
+                  {loginBusy ? (
                     <ActivityIndicator color="#ffffff" />
                   ) : (
-                    <Text style={styles.primaryButtonText}>Login</Text>
+                    <Text style={styles.primaryButtonText}>
+                      {appSignedIn ? 'Reconnect IBKR' : login.challengeId ? 'Verify and connect' : 'Send code'}
+                    </Text>
                   )}
                 </Pressable>
-                {error ? <Text style={styles.errorBanner}>{error}</Text> : null}
+                {!appSignedIn && login.challengeId ? <>
+                  <Pressable accessibilityRole="button" disabled={loginBusy} onPress={() => { resetLogin(); setError(null); }}>
+                    <Text style={styles.inputLabel}>Change username</Text>
+                  </Pressable>
+                  <Pressable accessibilityRole="button" disabled={loginBusy} onPress={() => { setError(null); void login.requestCode(); }}>
+                    <Text style={styles.inputLabel}>Resend code</Text>
+                  </Pressable>
+                </> : null}
+                {loginError ? <Text style={styles.errorBanner}>{loginError}</Text> : null}
               </View>
             </View>
           </ScrollView>
@@ -521,7 +590,6 @@ export default function TraderAppScreen() {
             onLogout={handleLogout}
             onRefresh={handleRefreshSession}
             openOrders={openOrders}
-            publicIp={publicIp}
             selectedAlias={selectedAlias}
             watchlists={watchlists}
           />
@@ -818,7 +886,6 @@ function AccountScreen({
   onLogout,
   onRefresh,
   openOrders,
-  publicIp,
   selectedAlias,
   watchlists,
 }: {
@@ -827,7 +894,6 @@ function AccountScreen({
   onLogout: () => Promise<void>;
   onRefresh: () => Promise<void>;
   openOrders: OpenOrder[];
-  publicIp: string | null;
   selectedAlias: string;
   watchlists: WatchlistSummary[];
 }) {
@@ -841,7 +907,6 @@ function AccountScreen({
         <Text style={styles.accountPanelMeta}>
           Allowed assets: {accountsInfo.allowFeatures.allowedAssetTypes}
         </Text>
-        {publicIp ? <Text style={styles.accountPanelMeta}>IP: {publicIp}</Text> : null}
       </InfoCard>
 
       <InfoCard>

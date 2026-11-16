@@ -39,6 +39,7 @@ import {
   type MarketSnapshot,
 } from "@/lib/api";
 import { historyQueries, marketDelivery, text } from "@/lib/market-data";
+import { useEmailLogin } from "@/hooks/use-email-login";
 import { usePrototype } from "@/features/prototype/context";
 import {
   Brand,
@@ -123,15 +124,25 @@ function TradingScreen() {
           >
             {detail ? (
               <InstrumentDetail
+                key={`${trading.sessionVersion}:${params.conid || ""}`}
                 conid={params.conid || ""}
                 symbol={params.symbol || parts[2] || ""}
                 back={back}
                 connect={() => setLoginOpen(true)}
               />
             ) : page === "home" ? (
-              <Home go={go} open={open} connect={() => setLoginOpen(true)} />
+              <Home
+                key={trading.sessionVersion}
+                go={go}
+                open={open}
+                connect={() => setLoginOpen(true)}
+              />
             ) : page === "market" ? (
-              <Market open={open} connect={() => setLoginOpen(true)} />
+              <Market
+                key={trading.sessionVersion}
+                open={open}
+                connect={() => setLoginOpen(true)}
+              />
             ) : (
               <More connect={() => setLoginOpen(true)} />
             )}
@@ -216,11 +227,36 @@ function ConnectionSheet({
   const { colors } = usePrototype(),
     trading = useTrading(),
     insets = useSafeAreaInsets();
-  const [credential, setCredential] = useState("");
+  const login = useEmailLogin();
   const connecting = trading.status === "connecting";
+  const busy = connecting || login.sending;
+  const verifying = Boolean(login.challengeId);
+  const canSubmit =
+    trading.signedIn ||
+    (verifying ? login.canVerify : Boolean(login.username.trim()));
+  const error =
+    login.error || (trading.signedIn || verifying ? trading.error : null);
+  const dismiss = () => {
+    if (busy) return;
+    login.reset();
+    close();
+  };
+  const requestCode = () => {
+    trading.clearError();
+    return login.requestCode();
+  };
   const submit = async () => {
-    if (await trading.connect(credential)) {
-      setCredential("");
+    if (busy || !canSubmit) return;
+    if (!trading.signedIn && !verifying) {
+      await requestCode();
+      return;
+    }
+    const proof = trading.signedIn
+      ? undefined
+      : { challengeId: login.challengeId, code: login.code };
+    login.setCode("");
+    if (await trading.connect(proof)) {
+      login.reset();
       close();
     }
   };
@@ -229,9 +265,7 @@ function ConnectionSheet({
       visible={open}
       transparent
       animationType="none"
-      onRequestClose={() => {
-        if (!connecting) close();
-      }}
+      onRequestClose={dismiss}
     >
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
@@ -245,9 +279,7 @@ function ConnectionSheet({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Cerrar conexión"
-          onPress={() => {
-            if (!connecting) close();
-          }}
+          onPress={dismiss}
           style={{ position: "absolute", inset: 0 }}
         />
         <View
@@ -264,44 +296,90 @@ function ConnectionSheet({
           }}
         >
           <Header
-            title="Conectar IBKR"
-            right={
-              <IconButton
-                icon={X}
-                label="Cerrar"
-                onPress={() => {
-                  if (!connecting) close();
-                }}
-              />
+            title={
+              connecting
+                ? "Conectando IBKR"
+                : trading.signedIn
+                  ? "Reconectar IBKR"
+                  : "Iniciar sesión"
             }
+            right={<IconButton icon={X} label="Cerrar" onPress={dismiss} />}
           />
           <Txt color={colors.secondary}>
-            Ingresá tu usuario IBKR para conectar con la identidad FD
-            configurada.
+            {trading.signedIn
+              ? "Volvé a conectar tu cuenta vinculada de IBKR."
+              : verifying
+                ? "Si tu usuario está registrado, vas a recibir un código de 8 dígitos en el correo asociado."
+                : "Ingresá tu usuario IBKR. Te enviaremos un código al correo registrado en AGM."}
           </Txt>
-          <Input
-            accessibilityLabel="Usuario IBKR"
-            placeholder="Usuario IBKR"
-            autoCapitalize="none"
-            autoCorrect={false}
-            value={credential}
-            onChangeText={setCredential}
-            editable={!connecting}
-            onSubmitEditing={() => void submit()}
-          />
-          {trading.error && (
+          {!trading.signedIn &&
+            (verifying ? (
+              <Input
+                accessibilityLabel="Código de inicio de sesión"
+                placeholder="Código de 8 dígitos"
+                keyboardType="number-pad"
+                autoComplete="one-time-code"
+                maxLength={8}
+                value={login.code}
+                onChangeText={login.setCode}
+                editable={!busy}
+                onSubmitEditing={() => void submit()}
+              />
+            ) : (
+              <Input
+                accessibilityLabel="Usuario IBKR"
+                placeholder="Usuario IBKR"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={64}
+                value={login.username}
+                onChangeText={login.setUsername}
+                editable={!busy}
+                onSubmitEditing={() => void submit()}
+              />
+            ))}
+          {error && (
             <Txt size={12} color={colors.red}>
-              {trading.error}
+              {error}
             </Txt>
           )}
           <PrimaryButton
-            title={connecting ? "Conectando…" : "Conectar"}
-            disabled={!credential.trim() || connecting}
+            title={
+              connecting
+                ? "Conectando…"
+                : trading.signedIn
+                  ? "Reconectar"
+                  : login.sending
+                    ? "Enviando…"
+                    : verifying
+                      ? "Verificar y conectar"
+                      : "Enviar código"
+            }
+            disabled={busy || !canSubmit}
             onPress={() => void submit()}
           />
+          {!trading.signedIn && verifying && (
+            <View style={[ui.row, { justifyContent: "space-between" }]}>
+              <Pressable
+                accessibilityRole="button"
+                disabled={busy}
+                onPress={login.reset}
+              >
+                <Txt color={colors.primaryText}>Cambiar usuario</Txt>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={busy}
+                onPress={() => void requestCode()}
+              >
+                <Txt color={colors.primaryText}>Reenviar código</Txt>
+              </Pressable>
+            </View>
+          )}
           <Txt size={11} color={colors.muted}>
-            La conexión usa tu sesión de IBKR. Las claves permanecen en el
-            servidor.
+            Al conectar, IBKR puede cerrar otra sesión de corretaje activa con
+            tu usuario.
           </Txt>
         </View>
       </KeyboardAvoidingView>
@@ -583,9 +661,7 @@ function Market({
     } catch (caught) {
       if (!active.current) return;
       setResults([]);
-      setError(
-        caught instanceof Error ? caught.message : "No se pudo buscar en IBKR",
-      );
+      setError(trading.handleApiError(caught));
     } finally {
       if (active.current) setLoading(false);
     }
@@ -677,7 +753,7 @@ function InstrumentDetail({
     [error, setError] = useState<string | null>(null);
   const remembered = trading.contracts[conid],
     quote = trading.snapshots[conid];
-  const { remember, watch, status } = trading;
+  const { handleApiError, remember, watch, status } = trading;
   useEffect(() => {
     if (status !== "connected" || !/^\d+$/.test(conid)) return;
     let cancelled = false;
@@ -696,17 +772,12 @@ function InstrumentDetail({
         watch([item]);
       })
       .catch((caught) => {
-        if (!cancelled)
-          setError(
-            caught instanceof Error
-              ? caught.message
-              : "No se pudo cargar el contrato",
-          );
+        if (!cancelled) setError(handleApiError(caught));
       });
     return () => {
       cancelled = true;
     };
-  }, [conid, symbol, status, remember, watch]);
+  }, [conid, symbol, status, handleApiError, remember, watch]);
   const currency = text(info?.currency),
     title = remembered?.symbol || quote?.symbol || symbol;
   return (
@@ -810,6 +881,7 @@ function InstrumentDetail({
 }
 function HistoryChart({ conid, range }: { conid: string; range: string }) {
   const { colors } = usePrototype();
+  const { handleApiError } = useTrading();
   const [bars, setBars] = useState<HistoricalBar[] | null>(null),
     [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -820,17 +892,12 @@ function HistoryChart({ conid, range }: { conid: string; range: string }) {
         if (!cancelled) setBars(bars);
       })
       .catch((caught) => {
-        if (!cancelled)
-          setError(
-            caught instanceof Error
-              ? caught.message
-              : "No se pudo cargar el gráfico",
-          );
+        if (!cancelled) setError(handleApiError(caught));
       });
     return () => {
       cancelled = true;
     };
-  }, [conid, range]);
+  }, [conid, range, handleApiError]);
   const labels =
     bars && bars.length
       ? [bars[0], bars[Math.floor(bars.length / 2)], bars[bars.length - 1]].map(
@@ -893,13 +960,19 @@ function More({ connect }: { connect: () => void }) {
       <Section style={{ paddingHorizontal: 16, marginBottom: 20 }}>
         <KeyValue label="Fuente de datos" value="IBKR Trading API" />
         <KeyValue
-          label="Estado"
+          label="Sesión en la app"
+          value={trading.signedIn ? "Activa" : "Cerrada"}
+        />
+        <KeyValue
+          label="Conexión IBKR"
           value={
             trading.status === "connected"
               ? "Conectado"
               : trading.status === "connecting"
                 ? "Conectando"
-                : "Desconectado"
+                : trading.status === "expired"
+                  ? "Reconexión necesaria"
+                  : "Desconectado"
           }
         />
         {trading.username && (
@@ -947,14 +1020,18 @@ function More({ connect }: { connect: () => void }) {
             </View>
           </Button>
         </View>
-        {trading.status === "connected" ? (
+        {trading.status !== "connected" && trading.status !== "connecting" && (
+          <MenuRow
+            label={trading.signedIn ? "Reconectar IBKR" : "Conectar IBKR"}
+            onPress={connect}
+          />
+        )}
+        {trading.signedIn && trading.status !== "connecting" && (
           <MenuRow
             icon={LogOut}
-            label="Desconectar IBKR"
+            label="Cerrar sesión"
             onPress={() => void trading.disconnect()}
           />
-        ) : (
-          <MenuRow label="Conectar IBKR" onPress={connect} />
         )}
       </Section>
       {trading.error && (
