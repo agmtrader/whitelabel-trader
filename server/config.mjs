@@ -100,7 +100,8 @@ function loadSecurityConfig(env, production) {
 
   const sessionFile = production
     ? required(env, "TRADER_SESSION_FILE")
-    : (env.TRADER_SESSION_FILE ?? ":memory:");
+    : (env.TRADER_SESSION_FILE ??
+      path.join(projectRoot, "output", "trader-state", "session.sqlite"));
   if (
     !path.isAbsolute(sessionFile) &&
     (production || sessionFile !== ":memory:")
@@ -135,6 +136,7 @@ function loadSecurityConfig(env, production) {
     allowedOrigins,
     trustedProxies,
     ibkrClientIp,
+    resolveLocalIbkrIp: !production && !ibkrClientIp,
     sessionFile,
     sessionIdleMs,
     sessionAbsoluteMs,
@@ -332,6 +334,7 @@ export async function loadConfig({
     "TRADER_ACCOUNT_LINKS_FILE",
     "TRADER_SMTP_CONFIG_FILE",
     "TRADER_AGM_MAIL_CONFIG_FILE",
+    "SUPABASE_DB_URL",
   ];
   if (production && localOverrides.some((name) => env[name] !== undefined)) {
     throw new Error(
@@ -343,18 +346,35 @@ export async function loadConfig({
       ? secretVersion(env, "IBKR_PRIVATE_KEY_SECRET_VERSION", projectId)
       : "projects/" +
         projectId +
-        "/secrets/IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY/versions/1";
+        "/secrets/IBKR_ACCOUNT_MANAGEMENT_PRIVATE_KEY/versions/latest";
+  const accountSource = env.TRADER_ACCOUNT_SOURCE ?? "database";
+  if (!["database", "links"].includes(accountSource))
+    throw new Error("Invalid TRADER_ACCOUNT_SOURCE");
   const linkResource =
-    production || env.TRADER_ACCOUNT_LINKS_SECRET_VERSION
+    accountSource === "links" &&
+    (production || env.TRADER_ACCOUNT_LINKS_SECRET_VERSION)
       ? secretVersion(env, "TRADER_ACCOUNT_LINKS_SECRET_VERSION", projectId)
       : null;
+  const databaseResource =
+    accountSource === "database"
+      ? production || env.TRADER_DATABASE_SECRET_VERSION
+        ? secretVersion(env, "TRADER_DATABASE_SECRET_VERSION", projectId)
+        : `projects/${projectId}/secrets/SUPABASE_DB_URL/versions/latest`
+      : null;
+  const defaultAgmMail =
+    !production &&
+    !env.TRADER_SMTP_SECRET_VERSION &&
+    !env.TRADER_SMTP_CONFIG_FILE;
   const agmMailConfigured =
     env.TRADER_AGM_MAIL_SECRET_VERSION !== undefined ||
-    Boolean(env.TRADER_AGM_MAIL_CONFIG_FILE);
+    Boolean(env.TRADER_AGM_MAIL_CONFIG_FILE) ||
+    defaultAgmMail;
   const agmMailResource =
     env.TRADER_AGM_MAIL_SECRET_VERSION !== undefined
       ? secretVersion(env, "TRADER_AGM_MAIL_SECRET_VERSION", projectId)
-      : null;
+      : defaultAgmMail && !env.TRADER_AGM_MAIL_CONFIG_FILE
+        ? `projects/${projectId}/secrets/TRADER_AGM_MAIL_CREDENTIALS/versions/latest`
+        : null;
   if (
     agmMailConfigured &&
     (env.TRADER_SMTP_SECRET_VERSION !== undefined ||
@@ -390,15 +410,40 @@ export async function loadConfig({
     return secretClient;
   };
   const accountLinks =
-    (await readJsonConfig(
-      env,
-      secretManager,
-      linkResource,
-      "TRADER_ACCOUNT_LINKS_FILE",
-      "trader account links",
-    )) ?? [];
+    accountSource === "links"
+      ? ((await readJsonConfig(
+          env,
+          secretManager,
+          linkResource,
+          "TRADER_ACCOUNT_LINKS_FILE",
+          "trader account links",
+        )) ?? [])
+      : [];
   if (!Array.isArray(accountLinks))
     throw new Error("Trader account links must be a JSON array");
+  let accountDatabase;
+  if (databaseResource) {
+    const connectionString =
+      env.SUPABASE_DB_URL ||
+      (await readSecret(
+        secretManager,
+        databaseResource,
+        "AGM account database",
+      ));
+    try {
+      const url = new URL(connectionString);
+      if (
+        !["postgres:", "postgresql:"].includes(url.protocol) ||
+        !url.hostname ||
+        !url.username ||
+        !url.password
+      )
+        throw new Error("Invalid URL");
+    } catch {
+      throw new Error("Invalid AGM account database configuration");
+    }
+    accountDatabase = { connectionString };
+  }
   const smtp = validateSmtp(
     await readJsonConfig(
       env,
@@ -428,6 +473,7 @@ export async function loadConfig({
     fdMasterAccount,
     credentials: { [fdMasterAccount]: { clientId, keyId } },
     accountLinks,
+    accountDatabase,
     smtp,
     agmMail,
     security,

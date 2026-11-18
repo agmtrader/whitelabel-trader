@@ -208,3 +208,61 @@ test("upstream request failures remain explicit and never return fixture quotes"
       error.message.includes("Missing market data permission"),
   );
 });
+
+test("an old request cannot expire the replacement user's session", async (t) => {
+  clearAppSession();
+  let session = 0;
+  let finish;
+  let observedHeader;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/auth/session" && init.method === "POST")
+      return Response.json({ sessionId: `session-${++session}` });
+    if (path.endsWith("/marketdata/snapshot"))
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    observedHeader = init.headers["X-Trader-Session"];
+    return Response.json({
+      accounts: ["U11111"],
+      selectedAccount: "U11111",
+      aliases: {},
+    });
+  });
+  await signInToTrader({ challengeId: "first", code: "11111111" });
+  const old = fetchMarketSnapshots(["265598"]);
+  await signInToTrader({ challengeId: "second", code: "22222222" });
+  finish(
+    Response.json(
+      { code: "APP_SESSION_REQUIRED", error: "expired old session" },
+      { status: 401 },
+    ),
+  );
+  await assert.rejects(
+    old,
+    (error) =>
+      error instanceof APIError &&
+      error.code === undefined &&
+      error.message.includes("sesión cambió"),
+  );
+  await fetchBrokerageAccounts();
+  assert.equal(observedHeader, "session-2");
+  clearAppSession();
+});
+
+test("failed broker logout clears app credentials and reports the unconfirmed broker state", async (t) => {
+  clearAppSession();
+  const headers = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    headers.push(init.headers["X-Trader-Session"]);
+    if (init.method === "POST")
+      return Response.json({ sessionId: "fixture-session" });
+    if (init.method === "DELETE")
+      return Response.json({ brokerLogoutConfirmed: false });
+    return Response.json({ accounts: [], aliases: {} });
+  });
+  await signInToTrader({ challengeId: "challenge", code: "11111111" });
+  await assert.rejects(signOutOfTrader(), /IBKR no confirmó/);
+  await fetchBrokerageAccounts();
+  assert.equal(headers.at(-1), undefined);
+});

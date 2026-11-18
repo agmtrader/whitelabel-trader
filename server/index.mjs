@@ -7,10 +7,14 @@ import {
   orderBelongsToAccount,
 } from "./accountAccess.mjs";
 import { IBKRTradingAPI } from "./ibkrTradingApi.mjs";
+import { createIbkrClientIpResolver } from "./ibkrClientIp.mjs";
+import { createDatabaseAccountAccess } from "./databaseAccountAccess.mjs";
 import { createLoginChallenges } from "./loginChallenges.mjs";
 import { createAgmLoginMailer, createLoginMailer } from "./loginMailer.mjs";
 import { createRequestSecurity, readJson } from "./security.mjs";
 import { createSessionStore } from "./sessionStore.mjs";
+import { readPortfolio, unavailable } from "./portfolio.mjs";
+import { createOrderWorkflow, exactBody } from "./orders.mjs";
 
 const prefix = "/accounts/ibkr";
 const appSessionPath = "/auth/session";
@@ -20,8 +24,34 @@ const messages = {
     "El código es incorrecto o venció. Revisalo o solicitá otro.",
   INVALID_USERNAME: "Ingresá un usuario IBKR válido.",
   EMAIL_UNAVAILABLE: "El envío de códigos no está disponible en este momento.",
+  ACCOUNT_DIRECTORY_UNAVAILABLE:
+    "No se pudo consultar tu cuenta. Intentá de nuevo en unos minutos.",
   APP_SESSION_REQUIRED: "Iniciá sesión para continuar.",
   BROKER_RECONNECT: "Reconectá IBKR para continuar.",
+  BROKER_CLIENT_IP_UNAVAILABLE:
+    "No se pudo confirmar la dirección pública para conectar IBKR. Intentá de nuevo.",
+  BROKER_ACCESS_DENIED:
+    "IBKR no autorizó el acceso de este usuario con la integración configurada.",
+  BROKER_COMPETING:
+    "Tu usuario tiene otra sesión IBKR activa. Reconectá para usar esta app.",
+  ORDER_CONFIRMATION_PENDING:
+    "Respondé la advertencia de IBKR en Actividad antes de continuar.",
+  ORDER_RECONCILIATION_REQUIRED:
+    "Hay una orden con resultado incierto. Reconciliá su estado en Actividad.",
+  ORDER_REVIEW_EXPIRED: "La revisión venció. Revisá nuevamente la orden.",
+  ORDER_WRITES_DISABLED:
+    "Las órdenes requieren almacenamiento persistente de sesiones y operaciones.",
+  INVALID_TICKET:
+    "Revisá la cantidad y el precio. Solo acciones enteras, MKT o LMT, DAY y horario regular.",
+  UNSUPPORTED_ORDER:
+    "IBKR no confirmó permisos o reglas compatibles para esta operación.",
+  INSUFFICIENT_HOLDINGS:
+    "La posición disponible no permite vender esta cantidad sin abrir un corto.",
+  INSUFFICIENT_CASH:
+    "No se confirmó efectivo liquidado suficiente en la moneda de la orden, sin financiamiento ni otras compras pendientes.",
+  ORDER_PREVIEW_REJECTED: "IBKR rechazó la estimación de esta orden.",
+  BROKER_DATA_UNAVAILABLE:
+    "IBKR no devolvió información completa. Volvé a actualizar.",
   ACCOUNT_MISMATCH: "IBKR no confirmó la cuenta vinculada.",
   RESOURCE_DENIED: "El recurso no está disponible para esta cuenta.",
   400: "Solicitud inválida.",
@@ -139,10 +169,17 @@ export function createTraderServer(
         ? createLoginMailer(config.smtp)
         : undefined,
     now = Date.now,
+    resolveBrokerIp = createIbkrClientIpResolver(config.security, { now }),
+    accountAccess = config.accountDatabase
+      ? createDatabaseAccountAccess(config.accountDatabase)
+      : createAccountAccess(config.accountLinks),
   } = {},
 ) {
-  const accountAccess = createAccountAccess(config.accountLinks);
-  if (config.security.production && config.accountLinks.length === 0) {
+  if (
+    config.security.production &&
+    !config.accountDatabase &&
+    config.accountLinks.length === 0
+  ) {
     throw new Error("Production requires verified account links");
   }
   if (config.security.production && !sendLoginCode) {
@@ -163,6 +200,17 @@ export function createTraderServer(
   });
   const brokerages = new Map();
   const lifecycle = new Map();
+  const orderWritesEnabled =
+    config.orderWritesEnabled ?? config.security.sessionFile !== ":memory:";
+  const orders = createOrderWorkflow(sessions.orders, {
+    now,
+    writesEnabled: orderWritesEnabled,
+    assertAuthorized(user, client) {
+      assertActive(user);
+      if (brokerages.get(user.link.subject)?.client !== client)
+        throw failure(409, "BROKER_RECONNECT");
+    },
+  });
 
   function serialize(subject, operation) {
     const pending = (lifecycle.get(subject) ?? Promise.resolve()).then(
@@ -179,22 +227,30 @@ export function createTraderServer(
   async function remoteLogout(client) {
     try {
       await client.logout();
-    } catch {
-      log("broker_logout_failed");
+      return true;
+    } catch (error) {
+      log("broker_logout_failed", { upstreamStatus: error?.statusCode });
+      return false;
     }
   }
 
   function discardBrokerage(subject) {
     const brokerage = brokerages.get(subject);
-    if (!brokerage) return;
+    if (!brokerage) return Promise.resolve(true);
     brokerages.delete(subject);
-    void serialize(subject, () => remoteLogout(brokerage.client));
+    orders.invalidateSession(brokerage.link);
+    const result = remoteLogout(brokerage.client);
+    // Revocation and logout do not wait behind a hung account read. Future
+    // connections still wait for the old client to finish logging out.
+    void serialize(subject, () => result);
+    return result;
   }
 
   function clearExpiredBrokerages() {
     sessions.prune();
     for (const [subject, brokerage] of brokerages) {
-      if (!sessions.isActive(brokerage.sessionId)) discardBrokerage(subject);
+      if (!sessions.isActive(brokerage.sessionId))
+        void discardBrokerage(subject);
     }
   }
 
@@ -210,10 +266,10 @@ export function createTraderServer(
   );
   timer.unref();
 
-  function requireUser(request, signingOut) {
+  async function requireUser(request, signingOut) {
     const token = request.headers["x-trader-session"];
     const session = sessions.get(token, { touch: false });
-    const link = session && accountAccess.getLink(session.userId);
+    const link = session && (await accountAccess.getLink(session.userId));
     if (!link) {
       if (signingOut) security.checkRate(request);
       if (session) sessions.revoke(token);
@@ -229,6 +285,7 @@ export function createTraderServer(
   }
 
   function handleBrokerError(error, user) {
+    if (error?.statusCode === 403) throw failure(403, "BROKER_ACCESS_DENIED");
     if ([401, 409].includes(error?.statusCode)) {
       discardBrokerage(user.link.subject);
       throw failure(409, "BROKER_RECONNECT");
@@ -239,7 +296,7 @@ export function createTraderServer(
 
   async function connectBrokerage(request, user) {
     const { link, sessionId } = user;
-    const ip = config.security.ibkrClientIp || security.getClientIp(request);
+    const peer = config.security.ibkrClientIp || security.getClientIp(request);
     return serialize(link.subject, async () => {
       assertActive(user);
       const existing = brokerages.get(link.subject);
@@ -247,21 +304,36 @@ export function createTraderServer(
 
       const client = createBroker();
       let ssoCreated = false;
+      let stage = "client_address";
       try {
+        const ip = await resolveBrokerIp(peer);
+        assertActive(user);
+        stage = "sso";
         await client.createSsoSession(link.ibkrUsername, ip);
         ssoCreated = true;
         assertActive(user);
+        stage = "initialize";
         await client.initializeBrokerageSession();
+        stage = "status";
         const status = await client.tickle();
-        if (!isBrokerageReady(status)) throw failure(409, "BROKER_RECONNECT");
+        if (!isBrokerageReady(status))
+          throw failure(
+            409,
+            status.competing ? "BROKER_COMPETING" : "BROKER_RECONNECT",
+          );
+        stage = "accounts";
         const account = {
           ...ownedAccount(await client.getBrokerageAccounts(), link.accountId),
           username: link.ibkrUsername,
         };
         assertActive(user);
-        brokerages.set(link.subject, { sessionId, client, account });
+        brokerages.set(link.subject, { sessionId, client, account, link });
         return account;
       } catch (error) {
+        log("broker_connect_failed", {
+          stage,
+          statusCode: error?.statusCode,
+        });
         if (ssoCreated) await remoteLogout(client);
         if (Object.hasOwn(messages, error?.code)) throw error;
         handleBrokerError(error, user);
@@ -269,11 +341,13 @@ export function createTraderServer(
     });
   }
 
-  async function withBrokerage(user, operation) {
+  async function runWithBrokerage(user, operation, allowWarning) {
     assertActive(user);
     const brokerage = brokerages.get(user.link.subject);
     if (brokerage?.sessionId !== user.sessionId)
       throw failure(409, "BROKER_RECONNECT");
+    if (!allowWarning && orders.pendingWarning(user.link))
+      throw failure(409, "ORDER_CONFIRMATION_PENDING");
     let payload;
     try {
       payload = await operation(brokerage.client, user.link.accountId);
@@ -295,6 +369,12 @@ export function createTraderServer(
     if (brokerages.get(user.link.subject) !== brokerage)
       throw failure(409, "BROKER_RECONNECT");
     return payload;
+  }
+
+  function withBrokerage(user, operation, allowWarning = false) {
+    return serialize(user.link.subject, () =>
+      runWithBrokerage(user, operation, allowWarning),
+    );
   }
 
   const brokerRoutes = new Map([
@@ -398,6 +478,22 @@ export function createTraderServer(
     }
     if (!pathname.startsWith(prefix + "/")) return null;
     const path = pathname.slice(prefix.length);
+    if (
+      (request.method === "GET" &&
+        ["/portfolio", "/orders/activity"].includes(path)) ||
+      (request.method === "POST" && path === "/orders/preview")
+    )
+      return { key: request.method + " " + path, workflow: true, path };
+    const action = /^\/orders\/([A-Za-z0-9-]+)\/(submit|reply|cancel)$/.exec(
+      path,
+    );
+    if (request.method === "POST" && action)
+      return {
+        key: "POST /orders/:id/" + action[2],
+        workflow: true,
+        id: action[1],
+        action: action[2],
+      };
     if (request.method === "POST" && path === "/sso/connect") return "connect";
     const contract =
       request.method === "GET" && /^\/contract\/(\d+)$/.exec(path);
@@ -437,7 +533,7 @@ export function createTraderServer(
         );
         const username = normalizeUsername(body.username);
         if (!username) throw failure(400, "INVALID_USERNAME");
-        const challengeId = loginChallenges.request(username);
+        const challengeId = await loginChallenges.request(username);
         json(response, 202, { challengeId });
         return;
       }
@@ -447,8 +543,17 @@ export function createTraderServer(
           await readJson(request, config.security.maxBodyBytes),
           ["challengeId", "code"],
         );
-        const link = loginChallenges.consume(body.challengeId, body.code);
-        if (!link) throw failure(401, "INVALID_LOGIN_CODE");
+        const challengedLink = loginChallenges.consume(
+          body.challengeId,
+          body.code,
+        );
+        const link =
+          challengedLink &&
+          (await accountAccess.findAccount(
+            challengedLink.ibkrUsername.toLowerCase(),
+          ));
+        if (!link || link.subject !== challengedLink.subject)
+          throw failure(401, "INVALID_LOGIN_CODE");
         sessions.revokeUser(link.subject);
         discardBrokerage(link.subject);
         const { token } = sessions.create(link.subject);
@@ -456,11 +561,15 @@ export function createTraderServer(
         return;
       }
 
-      const user = requireUser(request, signingOut);
+      const user = await requireUser(request, signingOut);
       if (signingOut) {
         sessions.revoke(user.token);
-        discardBrokerage(user.link.subject);
-        json(response, 204);
+        const confirmed = await discardBrokerage(user.link.subject);
+        json(
+          response,
+          confirmed ? 204 : 200,
+          confirmed ? undefined : { brokerLogoutConfirmed: false },
+        );
         return;
       }
 
@@ -480,6 +589,52 @@ export function createTraderServer(
         request.method === "POST"
           ? await readJson(request, config.security.maxBodyBytes)
           : undefined;
+      if (route.workflow) {
+        if (url.search) throw unavailable("INVALID_TICKET", 400);
+        const result = await withBrokerage(
+          user,
+          async (client, accountId) => {
+            if (route.path === "/portfolio")
+              return readPortfolio(client, accountId, now);
+            if (route.path === "/orders/activity")
+              return orders.activity(client, user);
+            if (route.path === "/orders/preview")
+              return orders.preview(client, user, body);
+            if (route.action === "submit") {
+              exactBody(body, ["confirmed"]);
+              if (body.confirmed !== true)
+                throw unavailable("INVALID_TICKET", 400);
+              return orders.submit(client, user, route.id);
+            }
+            if (route.action === "reply")
+              return orders.reply(client, user, route.id, body);
+            return orders.cancel(client, user, route.id, body);
+          },
+          route.path === "/orders/activity" ||
+            route.action === "reply" ||
+            route.action === "submit",
+        );
+        // Keep durable session digests and provider reply identifiers server-side.
+        const publicIntent = (intent) => {
+          if (!intent) return intent;
+          const {
+            sessionId: _sessionId,
+            replyId: _replyId,
+            ...visible
+          } = intent;
+          return visible;
+        };
+        json(
+          response,
+          200,
+          result?.intents
+            ? { ...result, intents: result.intents.map(publicIntent) }
+            : result?.id
+              ? { ...publicIntent(result), writesEnabled: orderWritesEnabled }
+              : result,
+        );
+        return;
+      }
       const result = await withBrokerage(user, (client, accountId) =>
         brokerRoutes.get(route.key)(
           client,
@@ -491,7 +646,10 @@ export function createTraderServer(
       );
       if (route.key === "GET /sso/status" && !isBrokerageReady(result)) {
         discardBrokerage(user.link.subject);
-        throw failure(409, "BROKER_RECONNECT");
+        throw failure(
+          409,
+          result.competing ? "BROKER_COMPETING" : "BROKER_RECONNECT",
+        );
       }
       json(response, 200, result);
     } catch (error) {
@@ -529,6 +687,9 @@ export function createTraderServer(
   server.on("close", () => {
     clearInterval(timer);
     sessions.close();
+    void accountAccess
+      .close?.()
+      .catch(() => log("account_directory_close_failed"));
   });
   return server;
 }
@@ -537,10 +698,16 @@ export async function startServer() {
   const { loadConfig } = await import("./config.mjs");
   const config = await loadConfig();
   const server = createTraderServer(config);
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(config.port, config.host, resolve);
-  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(config.port, config.host, resolve);
+    });
+  } catch (error) {
+    // A failed bind must release the session database and cleanup timer.
+    await new Promise((resolve) => server.close(resolve));
+    throw error;
+  }
   log("server_ready", { port: config.port });
   return server;
 }
@@ -553,7 +720,17 @@ if (
     const setting = /^(?:Missing|Invalid) ([A-Z][A-Z_0-9]+)$/.exec(
       error?.message,
     )?.[1];
-    log("startup_failed", setting ? { setting } : {});
+    const startupMessages = {
+      SESSION_STORE_LOCKED:
+        "The session database is locked by another Trader API process. Stop that process and run npm run dev again.",
+      EADDRINUSE:
+        "The Trader API port is already in use. Stop the other process or configure TRADER_API_PORT and the app API URL.",
+    };
+    const message = startupMessages[error?.code];
+    log(
+      "startup_failed",
+      message ? { code: error.code, message } : setting ? { setting } : {},
+    );
     process.exitCode = 1;
   });
 }

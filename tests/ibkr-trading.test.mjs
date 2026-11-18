@@ -156,3 +156,72 @@ test("tickle returns only session health flags, never provider session credentia
     competing: false,
   });
 });
+
+test("raw order writes preserve transport failures without priming or replay", async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    calls.push([new URL(String(url)).pathname, init.method]);
+    return Response.json({ error: "provider failure" }, { status: 500 });
+  });
+  await assert.rejects(
+    client().brokerRequest("POST", "/iserver/account/U11111/orders", {
+      orders: [],
+    }),
+    (error) => error.statusCode === 500,
+  );
+  assert.deepEqual(calls, [["/v1/api/iserver/account/U11111/orders", "POST"]]);
+});
+
+test("concurrent account discovery is paced from actual provider request start times", async (t) => {
+  const starts = [];
+  t.mock.method(globalThis, "fetch", async () => {
+    starts.push(Date.now());
+    return Response.json([]);
+  });
+  const api = client();
+  await Promise.all([
+    api.brokerRequest("GET", "/portfolio/accounts"),
+    api.brokerRequest("GET", "/portfolio/accounts"),
+  ]);
+  assert.equal(starts.length, 2);
+  assert.ok(
+    starts[1] - starts[0] >= 4950,
+    "Portfolio discovery exceeded IBKR's five-second request limit",
+  );
+});
+
+test("FD token and SSO permission failures retain status without exposing provider details", async (t) => {
+  const api = client();
+  api.buildClientAssertion = () => "fixture-client-assertion";
+  t.mock.method(globalThis, "fetch", async () =>
+    Response.json({ detail: "private account information" }, { status: 403 }),
+  );
+  await assert.rejects(
+    api.getBearerToken(),
+    (error) => error.statusCode === 403 && !error.message.includes("private"),
+  );
+  api.getBearerToken = async () => "fixture-oauth-token";
+  api.signRequest = () => "fixture-signed-request";
+  await assert.rejects(
+    api.createSsoSession("fixture-paper", "203.0.113.1"),
+    (error) => error.statusCode === 403 && !error.message.includes("private"),
+  );
+});
+
+test("malformed provider tokens cannot establish a usable session", async (t) => {
+  const api = client();
+  api.buildClientAssertion = () => "fixture-client-assertion";
+  t.mock.method(globalThis, "fetch", async () =>
+    Response.json({ access_token: {}, expires_in: 3600 }),
+  );
+  await assert.rejects(
+    api.getBearerToken(),
+    (error) => error.statusCode === 502,
+  );
+  api.getBearerToken = async () => "fixture-oauth-token";
+  api.signRequest = () => "fixture-signed-request";
+  await assert.rejects(
+    api.createSsoSession("fixture-paper", "203.0.113.1"),
+    (error) => error.statusCode === 502,
+  );
+});

@@ -3,9 +3,16 @@ import {
   normalizeMarketSnapshot,
   watchlistRows,
 } from "./market-data.ts";
+import type {
+  OrderActivity,
+  OrderIntent,
+  OrderTicket,
+  Portfolio,
+} from "./trading-types";
 
 const API_BASE_URL =
-  process.env.EXPO_PUBLIC_TRADER_API_BASE_URL || "http://localhost:5100";
+  process.env.EXPO_PUBLIC_TRADER_API_BASE_URL ||
+  (process.env.NODE_ENV === "production" ? "" : "http://localhost:5100");
 const REQUEST_TIMEOUT_MS = 30_000;
 let traderSessionId: string | null = null;
 
@@ -112,7 +119,35 @@ async function authorizedRequest<T>(
   path: string,
   init?: RequestInit,
   sessionId = traderSessionId,
+  checkSession = true,
 ): Promise<T> {
+  if (!API_BASE_URL)
+    throw new APIError(
+      "La URL de la API no está configurada para esta versión.",
+    );
+  let apiUrl: URL;
+  try {
+    apiUrl = new URL(API_BASE_URL);
+  } catch {
+    throw new APIError("La URL de la API no es válida.");
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
+    apiUrl.hostname,
+  );
+  if (
+    !["http:", "https:"].includes(apiUrl.protocol) ||
+    apiUrl.username ||
+    apiUrl.password ||
+    apiUrl.search ||
+    apiUrl.hash ||
+    (process.env.NODE_ENV === "production" &&
+      apiUrl.protocol !== "https:" &&
+      !loopback)
+  ) {
+    throw new APIError(
+      "La API requiere una dirección HTTPS válida para esta versión.",
+    );
+  }
   const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
@@ -121,6 +156,10 @@ async function authorizedRequest<T>(
       ...(init?.headers ?? {}),
     },
   });
+
+  if (checkSession && sessionId && sessionId !== traderSessionId) {
+    throw new APIError("La sesión cambió durante la solicitud.");
+  }
 
   if (!response.ok) {
     const body = asRecord(await response.json().catch(() => null));
@@ -138,7 +177,7 @@ async function authorizedRequest<T>(
   }
 
   const payload = (await response.json()) as T;
-  if (sessionId && sessionId !== traderSessionId) {
+  if (checkSession && sessionId && sessionId !== traderSessionId) {
     throw new APIError("La sesión cambió durante la solicitud.");
   }
   return payload;
@@ -442,12 +481,67 @@ export async function signOutOfTrader() {
   const sessionId = traderSessionId;
   clearAppSession();
   if (sessionId) {
-    await authorizedRequest("/auth/session", { method: "DELETE" }, sessionId);
+    const result = await authorizedRequest<
+      { brokerLogoutConfirmed?: boolean } | undefined
+    >("/auth/session", { method: "DELETE" }, sessionId, false);
+    if (result?.brokerLogoutConfirmed === false)
+      throw new APIError(
+        "La sesión de la app se cerró. IBKR no confirmó el cierre de su sesión.",
+      );
   }
 }
 
 export function getApiBaseUrl() {
   return API_BASE_URL;
+}
+
+export function fetchPortfolio() {
+  return authorizedRequest<Portfolio>("/accounts/ibkr/portfolio");
+}
+
+export function fetchOrderActivity() {
+  return authorizedRequest<OrderActivity>("/accounts/ibkr/orders/activity");
+}
+
+export function previewOrder(ticket: OrderTicket, modifyOrderId?: string) {
+  return authorizedRequest<OrderIntent>("/accounts/ibkr/orders/preview", {
+    method: "POST",
+    body: JSON.stringify({ ticket, modifyOrderId }),
+  });
+}
+
+export function submitOrder(intentId: string) {
+  return authorizedRequest<OrderIntent>(
+    `/accounts/ibkr/orders/${encodeURIComponent(intentId)}/submit`,
+    {
+      method: "POST",
+      body: JSON.stringify({ confirmed: true }),
+    },
+  );
+}
+
+export function replyToOrder(
+  intentId: string,
+  warningVersion: number,
+  confirmed: boolean,
+) {
+  return authorizedRequest<OrderIntent>(
+    `/accounts/ibkr/orders/${encodeURIComponent(intentId)}/reply`,
+    {
+      method: "POST",
+      body: JSON.stringify({ confirmed, warningVersion }),
+    },
+  );
+}
+
+export function cancelOrder(orderId: string) {
+  return authorizedRequest<OrderIntent>(
+    `/accounts/ibkr/orders/${encodeURIComponent(orderId)}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify({ confirmed: true }),
+    },
+  );
 }
 
 export function clearAppSession() {

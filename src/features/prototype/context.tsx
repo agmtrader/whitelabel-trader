@@ -1,6 +1,8 @@
 import {
   createContext,
   useContext,
+  useEffect,
+  useRef,
   useState,
   type PropsWithChildren,
 } from "react";
@@ -12,6 +14,7 @@ import {
   Inter_700Bold,
   Inter_800ExtraBold,
 } from "@expo-google-fonts/inter";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export const light = {
   bg: "#ffffff",
@@ -48,6 +51,41 @@ const dark: typeof light = {
 
 function usePrototypeState() {
   const [isDark, setDark] = useState(false);
+  const [themeError, setThemeError] = useState<string | null>(null);
+  const preferenceVersion = useRef(0);
+  const pendingSave = useRef(Promise.resolve());
+  useEffect(() => {
+    let mounted = true;
+    const version = preferenceVersion.current;
+    AsyncStorage.getItem("trader.theme")
+      .then((value) => {
+        if (mounted && preferenceVersion.current === version)
+          setDark(value === "dark");
+      })
+      .catch(() => {
+        if (mounted)
+          setThemeError(
+            "No se pudo leer el tema guardado en este dispositivo.",
+          );
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  const saveTheme = (value: boolean) => {
+    preferenceVersion.current++;
+    setDark(value);
+    setThemeError(null);
+    pendingSave.current = pendingSave.current
+      .then(() =>
+        AsyncStorage.setItem("trader.theme", value ? "dark" : "light"),
+      )
+      .catch(() => {
+        setThemeError(
+          "El tema cambió, pero no se pudo guardar en este dispositivo.",
+        );
+      });
+  };
   const [loaded] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -58,7 +96,8 @@ function usePrototypeState() {
   return {
     colors: isDark ? dark : light,
     isDark,
-    setDark,
+    setDark: saveTheme,
+    themeError,
     loaded,
   };
 }

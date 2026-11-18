@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createTraderServer } from "../server/index.mjs";
+import { createDatabaseAccountAccess } from "../server/databaseAccountAccess.mjs";
 
 const aliceEmail = "alice@example.test";
 const bobEmail = "bob@example.test";
@@ -42,6 +43,145 @@ const baseConfig = {
   },
 };
 const ibkr = "/accounts/ibkr";
+
+function databaseDirectory(rows) {
+  return createDatabaseAccountAccess(
+    {},
+    {
+      pool: {
+        async query(sql, values) {
+          return {
+            rows: rows
+              .filter((row) =>
+                sql.includes("where a.id")
+                  ? row.id === values[0]
+                  : row.ibkr_username.trim().toLowerCase() === values[0],
+              )
+              .slice(0, 2),
+          };
+        },
+        async end() {},
+      },
+    },
+  );
+}
+
+// These fields match the existing AGM account/account_contact/contact schema.
+const databaseAlice = {
+  id: "0947957d-e8bc-4d86-aefb-e05094d6b05a",
+  ibkr_username: " Alice_IBKR ",
+  ibkr_account_number: aliceAccount,
+  customer_email: aliceEmail,
+  temporal_email: null,
+  contact_emails: [aliceEmail],
+};
+
+test("database usernames receive codes without enrollment, including accounts added while running", async (t) => {
+  const rows = [{ ...databaseAlice }];
+  const fixture = brokerFixture();
+  const api = await listen(
+    t,
+    { ...baseConfig, accountLinks: [] },
+    {
+      ...fixture,
+      accountAccess: databaseDirectory(rows),
+    },
+  );
+  for (const username of ["unknown_ibkr", "ALICE_IBKR", bobUsername]) {
+    if (username === bobUsername)
+      rows.push({
+        ...databaseAlice,
+        id: "0947957d-e8bc-4d86-aefb-e05094d6b05b",
+        ibkr_username: bobUsername,
+        ibkr_account_number: "F22222",
+        customer_email: null,
+        contact_emails: [bobEmail],
+      });
+    const issued = await api.requestCode(username);
+    assert.equal(issued.status, 202);
+    const { challengeId } = await issued.json();
+    assert.deepEqual(Object.keys({ challengeId }), ["challengeId"]);
+    if (username === "unknown_ibkr") {
+      assert.equal(api.inbox.size, 0);
+      continue;
+    }
+    const email = username === bobUsername ? bobEmail : aliceEmail;
+    assert.match(api.inbox.get(email), /^\d{8}$/);
+    const signedIn = await api.verify(challengeId, api.inbox.get(email));
+    assert.equal(signedIn.status, 200);
+    const { sessionId } = await signedIn.json();
+    const status = await api.request(ibkr + "/sso/status", {
+      token: sessionId,
+    });
+    await assertError(status, 409, "BROKER_RECONNECT");
+  }
+  assert.deepEqual(fixture.calls, []);
+});
+
+test("database email edits invalidate pending codes and issued sessions", async (t) => {
+  const rows = [{ ...databaseAlice }];
+  const api = await listen(
+    t,
+    { ...baseConfig, accountLinks: [] },
+    {
+      accountAccess: databaseDirectory(rows),
+    },
+  );
+  const issued = await api.requestCode(aliceUsername).then((r) => r.json());
+  rows[0].customer_email = bobEmail;
+  await assertError(
+    await api.verify(issued.challengeId, api.inbox.get(aliceEmail)),
+    401,
+    "INVALID_LOGIN_CODE",
+  );
+
+  const directory = databaseDirectory(rows);
+  const link = await directory.findAccount(aliceUsername);
+  // A fresh instance can resolve a persisted identity after an API restart.
+  assert.deepEqual(await databaseDirectory(rows).getLink(link.subject), link);
+  rows[0].ibkr_username = "changed_ibkr";
+  assert.equal(await directory.getLink(link.subject), null);
+  assert.equal(await directory.findAccount(aliceUsername), null);
+});
+
+test("ambiguous database users and missing mailboxes receive no code, lookup failures report unavailability", async (t) => {
+  const rows = [
+    { ...databaseAlice },
+    { ...databaseAlice, id: "0947957d-e8bc-4d86-aefb-e05094d6b05b" },
+  ];
+  const directory = databaseDirectory(rows);
+  assert.equal(await directory.findAccount(aliceUsername), null);
+  rows.pop();
+  rows[0].customer_email = null;
+  rows[0].contact_emails = [aliceEmail, bobEmail];
+  assert.equal(await directory.findAccount(aliceUsername), null);
+  rows[0].customer_email = "temporary@example.test";
+  rows[0].temporal_email = "temporary@example.test";
+  assert.equal(await directory.findAccount(aliceUsername), null);
+  const api = await listen(
+    t,
+    { ...baseConfig, accountLinks: [] },
+    {
+      accountAccess: createDatabaseAccountAccess(
+        {},
+        {
+          pool: {
+            async query() {
+              throw new Error("private database details");
+            },
+            async end() {},
+          },
+        },
+      ),
+    },
+  );
+  await assertError(
+    await api.requestCode(aliceUsername),
+    503,
+    "ACCOUNT_DIRECTORY_UNAVAILABLE",
+  );
+  assert.equal(api.inbox.size, 0);
+});
 
 function brokerFixture(overrides) {
   const calls = [];
@@ -341,10 +481,12 @@ test("logout revokes immediately despite a failed broker logout and suppresses a
   const inFlight = request(ibkr + "/orders", { token });
   await started;
   try {
-    assert.equal(
-      (await request("/auth/session", { token, method: "DELETE" })).status,
-      204,
-    );
+    const signedOut = await request("/auth/session", {
+      token,
+      method: "DELETE",
+    });
+    assert.equal(signedOut.status, 200);
+    assert.deepEqual(await signedOut.json(), { brokerLogoutConfirmed: false });
     await assertError(await connect(token), 401, "APP_SESSION_REQUIRED");
   } finally {
     finishRead({ orders: [{ orderId: "order", acct: aliceAccount }] });

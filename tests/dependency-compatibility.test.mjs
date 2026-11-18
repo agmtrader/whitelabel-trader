@@ -13,12 +13,15 @@ test("Expo Router query strings retain Unicode, spaces, arrays and literal plus 
     tags: ["S&P 500", "日本"],
   };
   assert.deepEqual({ ...query.parse(query.stringify(params)) }, params);
-  assert.deepEqual({ ...query.parse("search=S%26P+500&plus=%2B&empty=&flag") }, {
-    search: "S&P 500",
-    plus: "+",
-    empty: "",
-    flag: null,
-  });
+  assert.deepEqual(
+    { ...query.parse("search=S%26P+500&plus=%2B&empty=&flag") },
+    {
+      search: "S&P 500",
+      plus: "+",
+      empty: "",
+      flag: null,
+    },
+  );
 });
 
 test("routing malformed percent-encoded query values finishes within a bounded process", () => {
@@ -50,4 +53,26 @@ test("Xcode project identifiers retain the required 24-character uppercase hexad
   const ids = Array.from({ length: 100 }, () => project.generateUuid());
   assert.equal(new Set(ids).size, ids.length);
   for (const id of ids) assert.match(id, /^[A-F0-9]{24}$/);
+});
+
+test("a production app rejects an insecure remote API before sending credentials", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+    import assert from 'node:assert/strict';
+    process.env.NODE_ENV = 'production';
+    process.env.EXPO_PUBLIC_TRADER_API_BASE_URL = 'http://insecure.example.test';
+    const api = await import('./src/lib/api.ts');
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return Response.json({}); };
+    await assert.rejects(api.requestTraderSignIn('fixture-user'), /HTTPS/);
+    assert.equal(calls, 0);
+  `,
+    ],
+    { cwd: new URL("..", import.meta.url), encoding: "utf8", timeout: 3000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
 });

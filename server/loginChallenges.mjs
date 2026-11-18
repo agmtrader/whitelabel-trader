@@ -32,7 +32,7 @@ export function createLoginChallenges({
   const digest = (...parts) =>
     createHmac("sha256", secret).update(JSON.stringify(parts)).digest();
 
-  function request(username) {
+  async function request(username) {
     if (!sendLoginCode || deliveries >= maxDeliveries) {
       throw httpError(503, "Email delivery unavailable", {
         code: "EMAIL_UNAVAILABLE",
@@ -78,7 +78,6 @@ export function createLoginChallenges({
       });
     }
 
-    const link = findAccount(username);
     const id = randomBytes(32).toString("base64url");
     const code = String(randomInt(100_000_000)).padStart(8, "0");
     if (recipient.challengeId) pending.delete(recipient.challengeId);
@@ -91,11 +90,21 @@ export function createLoginChallenges({
       digest: digest("code", id, code),
       expiresAt: timestamp + codeLifetime,
       attempts: 0,
-      link,
+      link: null,
     });
 
-    if (link) {
-      deliveries++;
+    deliveries++;
+    let link;
+    try {
+      link = await findAccount(username);
+    } catch (error) {
+      pending.delete(id);
+      deliveries--;
+      throw error;
+    }
+    const challenge = pending.get(id);
+    if (link && challenge && challenge.expiresAt > now()) {
+      challenge.link = link;
       // Send after the HTTP response, keeping the response independent of email delivery.
       setImmediate(async () => {
         try {
@@ -107,6 +116,9 @@ export function createLoginChallenges({
           deliveries--;
         }
       });
+    } else {
+      pending.delete(id);
+      deliveries--;
     }
     return id;
   }

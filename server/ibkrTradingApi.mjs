@@ -6,6 +6,10 @@ import {
   marketDataFieldNameByValue,
 } from "./marketDataFields.mjs";
 
+// IBKR's global request budget is shared by every customer on this process.
+let globalRequestQueue = Promise.resolve();
+let globalLastRequestAt = 0;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -48,15 +52,46 @@ export class IBKRTradingAPI {
     this.lastRequestAt = 0;
     this.historyActive = 0;
     this.historyWaiters = [];
+    this.endpointStarts = new Map();
+    this.historyStarts = [];
   }
 
   async fetchTrading(url, init = {}) {
-    const turn = this.requestStartQueue.then(async () => {
-      await sleep(Math.max(0, this.lastRequestAt + 150 - Date.now()));
-      this.lastRequestAt = Date.now();
+    const path = new URL(url).pathname.replace(/^\/v1\/api/, "");
+    const spacing =
+      {
+        "/iserver/account/orders": 5000,
+        "/iserver/account/trades": 5000,
+        "/portfolio/accounts": 5000,
+        "/tickle": 1000,
+        "/pa/performance": 900000,
+      }[path] ?? 0;
+    const endpointTurn = this.requestStartQueue.then(async () => {
+      await sleep(
+        Math.max(
+          0,
+          (this.endpointStarts.get(path) ?? 0) + spacing - Date.now(),
+        ),
+      );
+      if (path === "/iserver/marketdata/history") {
+        this.historyStarts = this.historyStarts.filter(
+          (time) => Date.now() - time < 60000,
+        );
+        if (this.historyStarts.length >= 50)
+          await sleep(Math.max(0, this.historyStarts[0] + 60000 - Date.now()));
+      }
+      const slot = globalRequestQueue.then(async () => {
+        await sleep(Math.max(0, globalLastRequestAt + 150 - Date.now()));
+        globalLastRequestAt = Date.now();
+      });
+      globalRequestQueue = slot.catch(() => undefined);
+      await slot;
+      this.endpointStarts.set(path, Date.now());
+      if (path === "/iserver/marketdata/history")
+        this.historyStarts.push(Date.now());
     });
-    this.requestStartQueue = turn.catch(() => undefined);
-    await turn;
+    this.requestStartQueue = endpointTurn.catch(() => undefined);
+    await endpointTurn;
     try {
       return await fetch(url, {
         ...init,
@@ -74,6 +109,52 @@ export class IBKRTradingAPI {
         { statusCode: timedOut ? 504 : 502 },
       );
     }
+  }
+
+  // Order operations must never enter requestIserverJson's priming/retry path.
+  async brokerRequest(method, path, body) {
+    const response = await this.fetchTrading(`${this.baseUrl}/v1/api${path}`, {
+      method,
+      headers: this.requireSsoHeaders(),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (!response.ok)
+      throw Object.assign(new Error("Broker request failed"), {
+        statusCode: response.status,
+      });
+    const content = await response.text();
+    return content ? JSON.parse(content) : null;
+  }
+
+  async selectTradingAccount(accountId) {
+    const accounts = await this.getBrokerageAccounts();
+    if (!accounts.accounts.includes(accountId))
+      throw Object.assign(new Error("ACCOUNT_MISMATCH"), {
+        statusCode: 403,
+        code: "ACCOUNT_MISMATCH",
+      });
+    if (
+      this.providerSelectedAccount === accountId ||
+      (accounts.accounts.length === 1 && accounts.accounts[0] === accountId)
+    )
+      return;
+    const result = await this.brokerRequest("POST", "/iserver/account", {
+      acctId: accountId,
+    });
+    if (result?.set !== true || result?.acctId !== accountId)
+      throw Object.assign(new Error("ACCOUNT_MISMATCH"), {
+        statusCode: 403,
+        code: "ACCOUNT_MISMATCH",
+      });
+  }
+
+  async getOrderSnapshot() {
+    // The first response is preflight only, including when it contains [].
+    if (!this.ordersPrimed) {
+      await this.brokerRequest("GET", "/iserver/account/orders?force=true");
+      this.ordersPrimed = true;
+    }
+    return this.brokerRequest("GET", "/iserver/account/orders");
   }
 
   resolveCredential(masterAccount = this.fdMasterAccount) {
@@ -138,21 +219,35 @@ export class IBKRTradingAPI {
       scope: "sso-sessions.write",
     });
 
-    const response = await this.fetchTrading(`${this.baseUrl}/oauth2/api/v1/token`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
+    const response = await this.fetchTrading(
+      `${this.baseUrl}/oauth2/api/v1/token`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: payload,
       },
-      body: payload,
-    });
+    );
 
     if (!response.ok) {
-      throw new Error(
-        `Token request failed with ${response.status}: ${await response.text()}`,
+      throw Object.assign(
+        new Error(`Token request failed with ${response.status}`),
+        { statusCode: response.status },
       );
     }
 
     const data = await response.json();
+    if (
+      typeof data?.access_token !== "string" ||
+      !data.access_token ||
+      !Number.isFinite(Number(data.expires_in)) ||
+      Number(data.expires_in) <= 0
+    ) {
+      throw Object.assign(new Error("Invalid IBKR token response"), {
+        statusCode: 502,
+      });
+    }
     this.accessToken = data.access_token;
     this.accessTokenExpiresAt = now + Number(data.expires_in || 0) * 1000;
     return this.accessToken;
@@ -176,26 +271,30 @@ export class IBKRTradingAPI {
     this.resolveCredential();
     const token = await this.getBearerToken();
     const signedPayload = this.signRequest({ credential, ip });
-    const response = await this.fetchTrading(`${this.baseUrl}/gw/api/v1/sso-sessions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/jwt",
+    const response = await this.fetchTrading(
+      `${this.baseUrl}/gw/api/v1/sso-sessions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/jwt",
+        },
+        body: signedPayload,
       },
-      body: signedPayload,
-    });
+    );
 
     if (!response.ok) {
-      throw new Error(
-        `SSO session creation failed with ${response.status}: ${await response.text()}`,
+      throw Object.assign(
+        new Error(`SSO session creation failed with ${response.status}`),
+        { statusCode: response.status },
       );
     }
 
     const data = await response.json();
-    if (!data.access_token) {
-      throw new Error(
-        `No access token found in SSO response: ${JSON.stringify(data)}`,
-      );
+    if (typeof data?.access_token !== "string" || !data.access_token) {
+      throw Object.assign(new Error("Invalid IBKR SSO response"), {
+        statusCode: 502,
+      });
     }
     this.ssoToken = data.access_token;
     return data;
@@ -240,9 +339,9 @@ export class IBKRTradingAPI {
     });
 
     if (!response.ok) {
-      throw new Error(
-        `Logout failed with ${response.status}: ${await response.text()}`,
-      );
+      throw Object.assign(new Error(`Logout failed with ${response.status}`), {
+        statusCode: response.status,
+      });
     }
 
     return response.json();
@@ -290,6 +389,7 @@ export class IBKRTradingAPI {
     if (!Array.isArray(payload.accounts)) {
       payload.accounts = [];
     }
+    this.providerSelectedAccount = payload.selectedAccount;
     if (!payload.selectedAccount && payload.accounts.length > 0) {
       payload.selectedAccount = payload.accounts[0];
     }
@@ -636,7 +736,9 @@ export class IBKRTradingAPI {
       authenticated: status?.authenticated === true,
       connected: status?.connected === true,
       competing: status?.competing === true,
-      ...(typeof status?.established === "boolean" ? { established: status.established } : {}),
+      ...(typeof status?.established === "boolean"
+        ? { established: status.established }
+        : {}),
     };
   }
 

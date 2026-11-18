@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, constants, lstatSync, openSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { closeSync, constants, lstatSync, mkdirSync, openSync } from "node:fs";
+import { dirname, isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { createOrderStore } from "./orderStore.mjs";
 
 function sessionId(token) {
   if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token))
@@ -13,6 +14,10 @@ function prepareSessionFile(filename) {
   if (filename === ":memory:") return;
   if (!isAbsolute(filename))
     throw new Error("Session store requires an absolute path");
+  mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
+  const directory = lstatSync(dirname(filename));
+  if (!directory.isDirectory() || (directory.mode & 0o077) !== 0)
+    throw new Error("Session store directory must be private");
   if (!lstatSync(filename, { throwIfNoEntry: false })) {
     const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY;
     try {
@@ -60,6 +65,14 @@ export function createSessionStore({
     `);
   } catch (error) {
     database.close();
+    if ([5, 6].includes(error.errcode & 0xff)) {
+      throw Object.assign(
+        new Error("Session database is locked by another Trader API process", {
+          cause: error,
+        }),
+        { code: "SESSION_STORE_LOCKED" },
+      );
+    }
     throw error;
   }
 
@@ -93,6 +106,7 @@ export function createSessionStore({
   }
 
   return {
+    orders: createOrderStore(database, now),
     create(userId) {
       if (typeof userId !== "string" || !userId)
         throw new Error("Session requires a user");

@@ -1,0 +1,51 @@
+name: Phase 1 validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      paper_read_check:
+        description: Run the configured read-only paper account acceptance
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npx expo install --check
+      - run: npm run export:web
+        env:
+          EXPO_PUBLIC_TRADER_API_BASE_URL: https://api.example.test
+      - run: npx expo export --platform ios --platform android --output-dir output/native --max-workers 2
+        env:
+          EXPO_PUBLIC_TRADER_API_BASE_URL: https://api.example.test
+  paper-read-check:
+    if: github.event_name == 'workflow_dispatch' && inputs.paper_read_check
+    needs: validate
+    environment: paper-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/paper-acceptance.mjs
+        env:
+          TRADER_PAPER_API_URL: ${{ secrets.TRADER_PAPER_API_URL }}
+          TRADER_PAPER_SESSION_TOKEN: ${{ secrets.TRADER_PAPER_SESSION_TOKEN }}
+          TRADER_PAPER_ACCOUNT_ID: ${{ secrets.TRADER_PAPER_ACCOUNT_ID }}

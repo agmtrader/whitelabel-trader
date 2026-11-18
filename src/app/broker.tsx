@@ -86,7 +86,8 @@ export default function TraderAppScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [isDashboardLoading, setIsDashboardLoading] = useState(false);
   const [isSearchLoading, setIsSearchLoading] = useState(false);
-  const [isPositionLoading, setIsPositionLoading] = useState(false);
+  const [loadedPositionKey, setLoadedPositionKey] = useState('');
+  const isPositionLoading = selectedInstrument !== null && loadedPositionKey !== `${selectedInstrument.conid}:${positionRange}`;
   const [error, setError] = useState<string | null>(null);
 
   const clearAccountData = useCallback(() => {
@@ -340,13 +341,15 @@ export default function TraderAppScreen() {
   }
 
   function openInstrument(instrument: QuoteInstrument) {
+    setLoadedPositionKey('');
+    setSelectedHistory([]);
+    setSelectedContract(null);
     setSelectedInstrument(instrument);
     setPositionRange('1D');
   }
 
   useEffect(() => {
     if (!featuredInstrument) {
-      setFeaturedHistory([]);
       return;
     }
 
@@ -371,18 +374,15 @@ export default function TraderAppScreen() {
     return () => {
       cancelled = true;
     };
-  }, [featuredInstrument?.conid, homeRange]);
+  }, [featuredInstrument, homeRange]);
 
   useEffect(() => {
     if (!selectedInstrument) {
-      setSelectedHistory([]);
-      setSelectedContract(null);
       return;
     }
 
     const instrument = selectedInstrument;
     let cancelled = false;
-    setIsPositionLoading(true);
 
     async function run() {
       try {
@@ -413,7 +413,7 @@ export default function TraderAppScreen() {
         }
       } finally {
         if (!cancelled) {
-          setIsPositionLoading(false);
+          setLoadedPositionKey(`${instrument.conid}:${positionRange}`);
         }
       }
     }
@@ -422,7 +422,7 @@ export default function TraderAppScreen() {
     return () => {
       cancelled = true;
     };
-  }, [selectedInstrument?.conid, positionRange]);
+  }, [selectedInstrument, positionRange]);
 
   if (!accountsInfo) {
     return (
@@ -1250,7 +1250,7 @@ function BottomNav({
   activeTab: AppTab;
   onChange: (tab: AppTab) => void;
 }) {
-  const items: Array<{ key: AppTab; label: string; icon: string }> = [
+  const items: { key: AppTab; label: string; icon: string }[] = [
     { key: 'home', label: 'Home', icon: '⌂' },
     { key: 'watchlist', label: 'Watchlist', icon: '☆' },
     { key: 'search', label: 'Search', icon: '⌕' },

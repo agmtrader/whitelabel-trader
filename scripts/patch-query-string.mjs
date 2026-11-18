@@ -23,4 +23,4 @@ if (!source.includes(patched)) {
   await writeFile(filename, source.replace(original, patched));
 }
 assert.equal(routerRequire("query-string").parse("value=%2B").value, "+");
-console.log("Applied query-string 7.1.3 compatibility for decode-uri-component 0.5.0");
+console.log("Applied query-string 7.1.3 compatibility for decode-uri-component 0.5.1");

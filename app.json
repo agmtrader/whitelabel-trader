@@ -11,7 +11,7 @@
       "icon": "./assets/expo.icon",
       "infoPlist": {
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": true,
+          "NSAllowsArbitraryLoads": false,
           "NSAllowsLocalNetworking": true
         },
         "NSLocalNetworkUsageDescription": "This app connects to the local AGM API running on your Mac."

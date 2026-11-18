@@ -224,6 +224,7 @@ test("production checks configuration before reading the explicit secrets", asyn
     TRADER_ALLOWED_ORIGINS: "https://trader.example.com",
     TRADER_TRUSTED_PROXIES: "127.0.0.1",
     TRADER_SESSION_FILE: "/private/var/lib/trader/sessions.sqlite",
+    TRADER_ACCOUNT_SOURCE: "links",
     TRADER_ACCOUNT_LINKS_SECRET_VERSION:
       "projects/trader-example/secrets/links/versions/2",
     TRADER_SMTP_SECRET_VERSION:
@@ -314,4 +315,24 @@ test("production checks configuration before reading the explicit secrets", asyn
     agmMailResource,
     production.IBKR_PRIVATE_KEY_SECRET_VERSION,
   ]);
+
+  const databaseResource = "projects/trader-example/secrets/SUPABASE_DB_URL/versions/latest";
+  const defaultMailResource = "projects/trader-example/secrets/TRADER_AGM_MAIL_CREDENTIALS/versions/latest";
+  resources.length = 0;
+  const databaseConfig = await loadConfig({
+    env: { GCLOUD_PROJECT: "trader-example", IBKR_PRIVATE_KEY_SECRET_VERSION: production.IBKR_PRIVATE_KEY_SECRET_VERSION },
+    secretClient: {
+      async accessSecretVersion({ name }) {
+        resources.push(name);
+        const data = name === databaseResource
+          ? "postgresql://fixture:fixture@db.example.test/postgres"
+          : name === defaultMailResource ? JSON.stringify(agmMail) : privateKey;
+        return [{ payload: { data: Buffer.from(data) } }];
+      },
+    },
+  });
+  assert.deepEqual(databaseConfig.accountLinks, []);
+  assert.equal(databaseConfig.accountDatabase.connectionString, "postgresql://fixture:fixture@db.example.test/postgres");
+  assert.deepEqual(databaseConfig.agmMail, agmMail);
+  assert.deepEqual(resources, [databaseResource, defaultMailResource, production.IBKR_PRIVATE_KEY_SECRET_VERSION]);
 });

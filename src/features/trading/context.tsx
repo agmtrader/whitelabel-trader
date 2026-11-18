@@ -14,6 +14,8 @@ import {
   connectBrokerage,
   fetchBrokerageStatus,
   fetchMarketSnapshots,
+  fetchPortfolio,
+  fetchOrderActivity,
   fetchWatchlistDetail,
   fetchWatchlists,
   signInToTrader,
@@ -24,9 +26,15 @@ import {
   type WatchlistInstrument,
   type WatchlistSummary,
 } from "@/lib/api";
+import type {
+  OrderActivity,
+  OrderIntent,
+  Portfolio,
+} from "@/lib/trading-types";
 
 export type TradingInstrument = WatchlistInstrument;
-type Status = "disconnected" | "connecting" | "connected" | "expired";
+type Status =
+  "disconnected" | "connecting" | "connected" | "expired" | "competing";
 function useTradingState() {
   const [mode, setMode] = useState<"ibkr" | "demo">("ibkr");
   const [status, setStatus] = useState<Status>("disconnected");
@@ -46,6 +54,16 @@ function useTradingState() {
     {},
   );
   const [busy, setBusy] = useState(false);
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [portfolioError, setPortfolioError] = useState<string | null>(null);
+  const [portfolioBusy, setPortfolioBusy] = useState(false);
+  const [activity, setActivity] = useState<OrderActivity | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [activityBusy, setActivityBusy] = useState(false);
+  const portfolioRunning = useRef(false);
+  const activityRunning = useRef(false);
+  const confirmationPending = useRef(false);
+  const activityVersion = useRef(0);
   const generation = useRef(0);
   const quoteBusy = useRef(false);
   const snapshotIds = useRef<string[]>([]);
@@ -58,14 +76,16 @@ function useTradingState() {
       mounted.current = false;
     };
   }, []);
-  const resetBrokerage = useCallback(() => {
+  const resetBrokerage = useCallback((keepIdentity = false) => {
     connected.current = false;
     generation.current++;
     quoteBusy.current = false;
     snapshotIds.current = [];
     setSessionVersion(generation.current);
-    setAccounts(null);
-    setUsername("");
+    if (!keepIdentity) {
+      setAccounts(null);
+      setUsername("");
+    }
     setSnapshots({});
     setContracts({});
     setInstruments([]);
@@ -73,6 +93,16 @@ function useTradingState() {
     setWatchlistId(null);
     setBusy(false);
     setQuoteError(null);
+    setPortfolio(null);
+    setPortfolioError(null);
+    setPortfolioBusy(false);
+    setActivity(null);
+    setActivityError(null);
+    setActivityBusy(false);
+    portfolioRunning.current = false;
+    activityRunning.current = false;
+    confirmationPending.current = false;
+    activityVersion.current++;
   }, []);
   const remember = useCallback(
     (items: TradingInstrument[]) =>
@@ -97,20 +127,108 @@ function useTradingState() {
         setError(message);
       } else if (
         caught instanceof APIError &&
-        ["BROKER_RECONNECT", "ACCOUNT_MISMATCH"].includes(caught.code ?? "")
+        ["BROKER_RECONNECT", "BROKER_COMPETING", "ACCOUNT_MISMATCH"].includes(
+          caught.code ?? "",
+        )
       ) {
-        resetBrokerage();
-        setStatus("expired");
+        resetBrokerage(true);
+        setStatus(caught.code === "BROKER_COMPETING" ? "competing" : "expired");
         setError(message);
       }
       return message;
     },
     [resetBrokerage],
   );
+  const refreshPortfolio = useCallback(async () => {
+    if (
+      !connected.current ||
+      portfolioRunning.current ||
+      confirmationPending.current
+    )
+      return;
+    const run = generation.current;
+    portfolioRunning.current = true;
+    setPortfolioBusy(true);
+    try {
+      const result = await fetchPortfolio();
+      if (run !== generation.current || !mounted.current) return;
+      setPortfolio(result);
+      setPortfolioError(
+        result.errors.length
+          ? "IBKR devolvió información parcial. Las secciones no disponibles se muestran como —."
+          : null,
+      );
+    } catch (caught) {
+      if (run === generation.current && mounted.current)
+        setPortfolioError(fail(caught));
+    } finally {
+      if (run === generation.current && mounted.current) {
+        portfolioRunning.current = false;
+        setPortfolioBusy(false);
+      }
+    }
+  }, [fail]);
+  const refreshActivity = useCallback(async () => {
+    if (!connected.current || activityRunning.current) return;
+    const run = generation.current;
+    const version = activityVersion.current;
+    activityRunning.current = true;
+    setActivityBusy(true);
+    try {
+      const result = await fetchOrderActivity();
+      if (
+        run !== generation.current ||
+        version !== activityVersion.current ||
+        !mounted.current
+      )
+        return;
+      confirmationPending.current = result.intents.some(
+        (intent) => intent.state === "warning",
+      );
+      setActivity(result);
+      setActivityError(null);
+    } catch (caught) {
+      if (run === generation.current && mounted.current)
+        setActivityError(fail(caught));
+    } finally {
+      if (run === generation.current && mounted.current) {
+        activityRunning.current = false;
+        setActivityBusy(false);
+      }
+    }
+  }, [fail]);
+  const recordOrder = useCallback((intent: OrderIntent) => {
+    activityVersion.current++;
+    confirmationPending.current = intent.state === "warning";
+    setActivity((current) =>
+      current
+        ? {
+            ...current,
+            intents: [
+              intent,
+              ...current.intents.filter((row) => row.id !== intent.id),
+            ],
+          }
+        : {
+            intents: [intent],
+            orders: null,
+            executions: null,
+            receivedAt: Date.now(),
+            executionsReceivedAt: null,
+            writesEnabled: intent.writesEnabled ?? false,
+          },
+    );
+  }, []);
   const refreshQuotes = useCallback(
     async (ids?: string[]) => {
       const targets = ids || snapshotIds.current;
-      if (!connected.current || quoteBusy.current || !targets.length) return;
+      if (
+        !connected.current ||
+        quoteBusy.current ||
+        !targets.length ||
+        confirmationPending.current
+      )
+        return;
       quoteBusy.current = true;
       const run = generation.current;
       try {
@@ -157,7 +275,7 @@ function useTradingState() {
   const connect = async (proof?: TraderLoginProof) => {
     if (connecting.current || (!signedIn && !proof)) return false;
     connecting.current = true;
-    resetBrokerage();
+    resetBrokerage(signedIn);
     const run = generation.current;
     setStatus("connecting");
     setError(null);
@@ -228,7 +346,12 @@ function useTradingState() {
     }, 5000);
     let running = false;
     const checkStatus = async () => {
-      if (AppState.currentState !== "active" || running) return;
+      if (
+        AppState.currentState !== "active" ||
+        running ||
+        confirmationPending.current
+      )
+        return;
       running = true;
       const run = generation.current;
       try {
@@ -260,7 +383,33 @@ function useTradingState() {
       appState.remove();
     };
   }, [status, mode, fail, refreshQuotes]);
+  useEffect(() => {
+    if (status !== "connected") return;
+    const refresh = async () => {
+      if (AppState.currentState !== "active") return;
+      await refreshActivity();
+      await refreshPortfolio();
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 30000);
+    const listener = AppState.addEventListener("change", (state) => {
+      if (state === "active") void refresh();
+    });
+    return () => {
+      clearInterval(timer);
+      listener.remove();
+    };
+  }, [status, refreshActivity, refreshPortfolio]);
   return {
+    portfolio,
+    portfolioError,
+    portfolioBusy,
+    refreshPortfolio,
+    activity,
+    activityError,
+    activityBusy,
+    refreshActivity,
+    recordOrder,
     mode,
     setMode,
     status,

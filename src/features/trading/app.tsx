@@ -29,6 +29,7 @@ import {
   RefreshCw,
   Search,
   Sun,
+  Wallet,
   X,
 } from "lucide-react-native";
 import {
@@ -60,6 +61,8 @@ import {
   ui,
 } from "@/features/prototype/ui";
 import { useTrading, type TradingInstrument } from "./context";
+import { BalanceSummary, PortfolioScreen } from "./portfolio";
+import { ActivityScreen, OrderButtons } from "./orders";
 
 const price = (value?: number) =>
   value === undefined
@@ -143,9 +146,29 @@ function TradingScreen() {
                 open={open}
                 connect={() => setLoginOpen(true)}
               />
+            ) : page === "portfolio" ? (
+              <PortfolioScreen
+                key={trading.sessionVersion}
+                connect={() => setLoginOpen(true)}
+              />
+            ) : page === "activity" ? (
+              <ActivityScreen
+                key={trading.sessionVersion}
+                connect={() => setLoginOpen(true)}
+              />
             ) : (
               <More connect={() => setLoginOpen(true)} />
             )}
+            {trading.activity?.intents.some(
+              (intent) =>
+                intent.state === "warning" || intent.state === "unknown",
+            ) &&
+              page !== "activity" && (
+                <MenuRow
+                  label="Revisar orden pendiente en Actividad"
+                  onPress={() => go("activity")}
+                />
+              )}
             <Txt
               size={10}
               color={colors.muted}
@@ -170,6 +193,7 @@ function TradingScreen() {
             {[
               { page: "home", label: "Inicio", icon: House },
               { page: "market", label: "Mercado", icon: ChartColumn },
+              { page: "portfolio", label: "Portafolio", icon: Wallet },
               { page: "more", label: "Más", icon: Menu },
             ].map((item) => (
               <Button
@@ -554,6 +578,7 @@ function Home({
         </LinearGradient>
       </LinearGradient>
       <View style={{ paddingHorizontal: 16 }}>
+        <BalanceSummary />
         {trading.status === "connected" ? (
           <>
             <Label>MIS LISTAS</Label>
@@ -871,9 +896,12 @@ function InstrumentDetail({
             </Section>
           </View>
           <Txt size={11} color={colors.muted} style={{ marginTop: 16 }}>
-            Los campos no disponibles se muestran como —. Operaciones y
-            portafolio se incorporarán en una próxima etapa.
+            Los campos no disponibles se muestran como —.
           </Txt>
+          <OrderButtons
+            conid={conid}
+            symbol={symbol || text(info?.symbol) || conid}
+          />
         </>
       )}
     </View>
@@ -952,8 +980,9 @@ function HistoryChart({ conid, range }: { conid: string; range: string }) {
   );
 }
 function More({ connect }: { connect: () => void }) {
-  const { colors, isDark, setDark } = usePrototype(),
+  const { colors, isDark, setDark, themeError } = usePrototype(),
     trading = useTrading();
+  const router = useRouter();
   return (
     <View style={ui.page}>
       <Header title="Más" />
@@ -972,10 +1001,12 @@ function More({ connect }: { connect: () => void }) {
                 ? "Conectando"
                 : trading.status === "expired"
                   ? "Reconexión necesaria"
-                  : "Desconectado"
+                  : trading.status === "competing"
+                    ? "Otra sesión IBKR activa"
+                    : "Desconectado"
           }
         />
-        {trading.username && (
+        {Boolean(trading.username) && (
           <KeyValue label="Usuario" value={trading.username} />
         )}
         {trading.accounts && (
@@ -989,6 +1020,12 @@ function More({ connect }: { connect: () => void }) {
         )}
       </Section>
       <Section>
+        {trading.signedIn && (
+          <MenuRow
+            label="Actividad y órdenes"
+            onPress={() => router.push("/app/activity")}
+          />
+        )}
         <View style={[ui.row, { padding: 16, gap: 12 }]}>
           <Sun color={colors.accent} size={20} />
           <Txt style={{ flex: 1 }}>Tema oscuro</Txt>
@@ -1037,6 +1074,16 @@ function More({ connect }: { connect: () => void }) {
       {trading.error && (
         <Txt size={12} color={colors.red} style={{ marginTop: 16 }}>
           {trading.error}
+        </Txt>
+      )}
+      <Txt size={11} color={colors.secondary} style={{ marginTop: 12 }}>
+        El tema se guarda en este dispositivo. IBKR permite una sesión de
+        corretaje por usuario. Reconectar puede reemplazar la sesión en otra
+        plataforma.
+      </Txt>
+      {themeError && (
+        <Txt color={colors.red} size={12}>
+          {themeError}
         </Txt>
       )}
     </View>
